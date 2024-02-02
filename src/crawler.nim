@@ -129,7 +129,7 @@ when isMainModule:
 
   flags:
     --nimpkgs    path to nimpkgs.json (default: ./nimpkgs.json)
-    --packages   directort to write package data (default: ./packages)
+    --packages   directory to write package data (default: ./packages)
     -c,--check   list of packages to force query
     -n,--dryrun  only fetch remote commit info
     -a,--all     check remote's for all packages
