@@ -1,0 +1,11 @@
+src/*
+!src/*.*
+
+*repos/
+*packages/
+
+# atlas
+*.workspace
+src/nim.cfg
+
+
