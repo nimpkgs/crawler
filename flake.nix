@@ -22,5 +22,13 @@
         buildInputs = with pkgs; [nim nim-atlas openssl];
       };
     });
+    packages = forAllSystems (pkgs: {
+      default = pkgs.buildNimPackage {
+        name = "crawler";
+        src = ./.;
+        lockFile = ./lock.json;
+        buildInputs = [pkgs.openssl];
+      };
+    });
   };
 }
