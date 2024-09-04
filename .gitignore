@@ -1,11 +1,11 @@
 src/*
 !src/*.*
 
+result
+
 *repos/
 *packages/
 
-# atlas
-*.workspace
-src/nim.cfg
-
-
+nimbledeps
+nimble.paths
+nimble.develop

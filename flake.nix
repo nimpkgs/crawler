@@ -3,32 +3,58 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nim2nix = {
+      url = "github:daylinmorgan/nim2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-  }: let
-    inherit (nixpkgs.lib) genAttrs;
-    forAllSystems = f:
-      genAttrs ["x86_64-linux" "x86_64-darwin" "aarch64-linux" "aarch64-darwin"]
-      (system:
-        f (import nixpkgs {
-          localSystem.system = system;
-        }));
-  in {
-    devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShell {
-        buildInputs = with pkgs; [nim nim-atlas openssl];
-      };
-    });
-    packages = forAllSystems (pkgs: {
-      default = pkgs.buildNimPackage {
-        name = "crawler";
-        src = ./.;
-        lockFile = ./lock.json;
-        buildInputs = [pkgs.openssl];
-      };
-    });
-  };
+  outputs =
+    { nixpkgs, nim2nix, ... }:
+    let
+      inherit (nixpkgs.lib) genAttrs;
+      systems = [
+        "x86_64-linux"
+        "x86_64-darwin"
+        "aarch64-linux"
+        "aarch64-darwin"
+      ];
+
+      forAllSystems =
+        f:
+        genAttrs systems (
+          system:
+          f (
+            import nixpkgs {
+              inherit system;
+              overlays = [ nim2nix.overlays.default ];
+            }
+          )
+        );
+    in
+    {
+      devShells = forAllSystems (
+        pkgs: {
+          default = pkgs.mkShell {
+            buildInputs = with pkgs; [
+              nim
+              nimble
+              openssl
+            ];
+          };
+        }
+      );
+      packages = forAllSystems (
+        pkgs: {
+          default = pkgs.buildNimblePackage {
+            pname = "crawler";
+            version = "unstable";
+            src = ./.;
+            buildInputs = [ pkgs.openssl ];
+            nimbleDepsHash = "sha256-kw2AotgYEBncCUplrHJkWzDsHqcc8HFAzbXhexPBSyQ=";
+          };
+        }
+      );
+      formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
+    };
 }

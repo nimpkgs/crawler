@@ -1,4 +1,5 @@
-
-task setup, "run atlas init":
-  exec "atlas init --deps=.workspace"
-  exec "atlas install"
+# begin Nimble config (version 2)
+--noNimblePath
+when withDir(thisDir(), system.fileExists("nimble.paths")):
+  include "nimble.paths"
+# end Nimble config
