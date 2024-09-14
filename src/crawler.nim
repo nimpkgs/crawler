@@ -1,7 +1,7 @@
 import std/[
     algorithm, httpclient, strformat, strutils,
     options, osproc, os, sequtils,
-    sets, tables, times
+    sets, sugar, tables, times
 ]
 
 import jsony
@@ -11,9 +11,11 @@ type
   CrawlerContext = object
     nimpkgsPath = "./nimpkgs.json"
     packagesPath = "./packages"
-    dryrun, all: bool
+    dryrun, all, skipRecent: bool
     check: seq[string]
     filtered: seq[string]
+
+var ctx = CrawlerContext()
 
 proc fetchPackageJson(): string =
   var client = newHttpClient()
@@ -88,6 +90,18 @@ proc filterPackageList(
 
   result = (cliPkgs * officialPkgs).toSeq
 
+proc recent(): seq[string] =
+  ## brute force attempt to establish the most recent packages added to packages.json
+  let (output, errCode) = execCmdEx "git log --pretty'' --name-only"
+  if errCode != 0:
+    echo "failed to find most recent packages"
+    quit 1
+  var paths = output.splitLines().filterIt(it.startsWith("packages/"))
+  paths.reverse()
+  result = paths.toOrderedSet().toSeq()[^10..^1].mapIt(it.replace("packages/","").replace(".json",""))
+  result.reverse()
+
+
 proc updateNimPkgs(ctx: CrawlerContext) =
   createDir ctx.packagesPath
   createDir "repos"
@@ -110,10 +124,11 @@ proc updateNimPkgs(ctx: CrawlerContext) =
 
   nimpkgs.packagesHash = packagesRev.hash
   nimpkgs.updated = getTime()
+  nimpkgs.recent = recent()
   writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
 
 # NOTE: does this need to be it's own proc?
-proc crawl(ctx: CrawlerContext) =
+proc crawl() =
   if ctx.dryrun:
     echo "dryrun is a noop currently"
   if ctx.check.len > 0 and ctx.all:
@@ -121,6 +136,7 @@ proc crawl(ctx: CrawlerContext) =
     quit 1
 
   updateNimPkgs ctx
+ 
 
 when isMainModule:
   import std/parseopt
@@ -128,18 +144,17 @@ when isMainModule:
   crawler [flags]
 
   flags:
-    --nimpkgs    path to nimpkgs.json (default: ./nimpkgs.json)
-    --packages   directory to write package data (default: ./packages)
-    -c,--check   list of packages to force query
-    -n,--dryrun  only fetch remote commit info
-    -a,--all     check remote's for all packages
+    --nimpkgs     path to nimpkgs.json (default: ./nimpkgs.json)
+    --packages    directory to write package data (default: ./packages)
+    -c,--check    list of packages to force query
+    -n,--dryrun   only fetch remote commit info
+    -a,--all      check remote's for all packages
 
   examples:
     crawler --check=,jsony,futhark
     crawler -na
   """
 
-  var ctx = CrawlerContext()
   for kind, key, val in getopt(shortNoVal = {'a', 'n'}, longNoVal = @["all", "dryrun"]):
     case kind
     of cmdArgument:
@@ -161,7 +176,9 @@ when isMainModule:
         ctx.all = true
       of "n","dryrun":
         ctx.dryrun = true
+      of "skip-recency":
+        ctx.skipRecent = true
     of cmdEnd: discard
 
-  crawl ctx
+  crawl()
 
