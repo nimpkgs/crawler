@@ -1,9 +1,8 @@
 import std/[
     algorithm, httpclient, strformat, strutils,
     options, osproc, os, sequtils,
-    sets, sugar, tables, times
+    sets, tables, times
 ]
-
 import jsony
 import progress, packages
 
@@ -90,7 +89,7 @@ proc filterPackageList(
 
   result = (cliPkgs * officialPkgs).toSeq
 
-proc recent(): seq[string] =
+proc recent(existing: seq[string]): seq[string] =
   ## brute force attempt to establish the most recent packages added to packages.json
   let (output, errCode) = execCmdEx "git log --pretty'' --name-only"
   if errCode != 0:
@@ -98,7 +97,12 @@ proc recent(): seq[string] =
     quit 1
   var paths = output.splitLines().filterIt(it.startsWith("packages/"))
   paths.reverse()
-  result = paths.toOrderedSet().toSeq()[^10..^1].mapIt(it.replace("packages/","").replace(".json",""))
+  result = paths
+    .toOrderedSet()
+    .toSeq()[^10..^1]
+    .mapIt(it.replace("packages/","")
+    .replace(".json",""))
+    .filterIt(it in existing)
   result.reverse()
 
 
@@ -124,7 +128,7 @@ proc updateNimPkgs(ctx: CrawlerContext) =
 
   nimpkgs.packagesHash = packagesRev.hash
   nimpkgs.updated = getTime()
-  nimpkgs.recent = recent()
+  nimpkgs.recent = recent(nimpkgs.packages.keys.toSeq())
   writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
 
 # NOTE: does this need to be it's own proc?
