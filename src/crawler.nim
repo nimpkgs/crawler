@@ -19,7 +19,7 @@ var ctx = CrawlerContext()
 proc fetchPackageJson(): string =
   var client = newHttpClient()
   try:
-    return client.get(
+    result = client.get(
         "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
       ).body()
   finally:
@@ -89,13 +89,22 @@ proc filterPackageList(
 
   result = (cliPkgs * officialPkgs).toSeq
 
+proc gitCmd(cmd: string): string =
+  let (output, code) = execCmdEx cmd
+  result = output
+  if code != 0:
+    echo "failed to run cmd: " & cmd
+    echo "output\n:" & output
+    quit 1
+
+func packageFilesFromGitOutput(output: string): seq[string] =
+  output.splitLines().filterIt(it.startsWith("packages/"))
+
 proc recent(existing: seq[string]): seq[string] =
   ## brute force attempt to establish the most recent packages added to packages.json
-  let (output, errCode) = execCmdEx "git log --pretty'' --name-only"
-  if errCode != 0:
-    echo "failed to find most recent packages"
-    quit 1
-  var paths = output.splitLines().filterIt(it.startsWith("packages/"))
+  let lsFilesOutput = gitCmd("git ls-files --others --exclude-standard")
+  let logOutput = gitCmd("git log --pretty'' --name-only")
+  var paths = packageFilesFromGitOutput(lsFilesOutput & logOutput)
   paths.reverse()
   result = paths
     .toOrderedSet()
@@ -104,7 +113,6 @@ proc recent(existing: seq[string]): seq[string] =
     .replace(".json",""))
     .filterIt(it in existing)
   result.reverse()
-
 
 proc updateNimPkgs(ctx: CrawlerContext) =
   createDir ctx.packagesPath
@@ -129,6 +137,7 @@ proc updateNimPkgs(ctx: CrawlerContext) =
   nimpkgs.packagesHash = packagesRev.hash
   nimpkgs.updated = getTime()
   nimpkgs.recent = recent(nimpkgs.packages.keys.toSeq())
+  echo nimpkgs.recent
   writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
 
 # NOTE: does this need to be it's own proc?
