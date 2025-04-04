@@ -3,8 +3,8 @@ import std/[
     options, osproc, os, sequtils,
     sets, tables, times
 ]
-import jsony
-import progress, packages
+import jsony, hwylterm, hwylterm/hwylcli
+import ./[packages]
 
 type
   CrawlerContext = object
@@ -14,30 +14,26 @@ type
     check: seq[string]
     filtered: seq[string]
 
-var ctx = CrawlerContext()
+const nimlangPackageUrl =
+  "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
 
 proc fetchPackageJson(): string =
   var client = newHttpClient()
   try:
-    result = client.get(
-        "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
-      ).body()
+    result = client.get(nimLangPackageUrl).body()
   finally:
-    client.close
+    close client
 
 proc cmpPkgs*(a, b: Package): int =
   cmp(toLowerAscii($a.name), toLowerAscii($b.name))
 
 proc errQuit(args: varargs[string,`$`], code = 1) =
-  writeLine(stderr, "ERROR: ",args.join(""))
+  writeLine(stderr, "ERROR: ", args.join(""))
   quit code
 
 proc getPackages(): (Remote,seq[Package]) =
   let
-    (remoteResponse, code) = execCmdEx(
-      fmt"git ls-remote https://github.com/nim-lang/packages",
-      env = gitEnv
-    )
+    (remoteResponse, code) = execCmdEx(fmt"git ls-remote https://github.com/nim-lang/packages", env = gitEnv)
   if code != 0:
     errQuit("failed to get nim-lang/packages revision", code)
   let packagesRev = remoteResponse.parseRemotes().recent()
@@ -45,38 +41,38 @@ proc getPackages(): (Remote,seq[Package]) =
   packages.sort(cmpPkgs)
   return (packagesRev, packages)
 
-proc updateNimPkg(
-    pkg: Package,
-    oldNimpkgs: NimPkgs,
-    nimpkgs: var NimPkgs,
+
+func fromExisting(nimpkgs: NimPkgs, package: Package): NimPackage =
+  if package.name in nimpkgs.packages:
+    result = nimpkgs.packages[package.name]
+  else:
+    result <- package
+
+  if result.isInvalid:
+    result.deleted = true
+
+# TODO: refactor
+proc newNimPackage(
+    package: Package,
+    nimpkgs: NimPkgs,
     selected: seq[string],
-    pb: var ProgressBar,
-    ctx: CrawlerContext,
-) =
-  var np: NimPackage
+    packagesPath: string,
+    all: bool,
+): NimPackage =
 
-  if pkg.name in oldNimpkgs.packages:
-    np = oldNimpkgs.packages[pkg.name]
-  else:
-    pb.echo "mapping new package: " & pkg.name
-    np <- pkg
+  result = fromExisting(nimpkgs, package)
 
-  pb.status np.name
+  if not result.deleted and (
+    all or result.outOfDate or result.name in selected
+    ):
+      if checkRemotes(result):
+        updateVersions result
 
-  if np.deleted or np.isInvalid:
-    np.deleted = true
-  else:
-    if np.outOfDate or ctx.all or np.name in selected:
-      if checkRemotes(np, pb):
-        pb.status "cloning -> " & np.name
-        updateVersions np, pb
-
-  dump np,ctx.packagesPath
-  addPkg nimpkgs, np
-
+  dump result, packagesPath
 
 proc filterPackageList(
-    ctx: CrawlerContext, packages: seq[Package]
+    ctx: CrawlerContext,
+    packages: seq[Package]
 ): seq[string] =
   let
     cliPkgs = ctx.check.toHashSet
@@ -102,6 +98,7 @@ func packageFilesFromGitOutput(output: string): seq[string] =
 
 proc recent(existing: seq[string]): seq[string] =
   ## brute force attempt to establish the most recent packages added to packages.json
+
   let lsFilesOutput = gitCmd("git ls-files --others --exclude-standard")
   let logOutput = gitCmd("git log --pretty'' --name-only")
   var paths = packageFilesFromGitOutput(lsFilesOutput & logOutput)
@@ -114,9 +111,13 @@ proc recent(existing: seq[string]): seq[string] =
     .filterIt(it in existing)
   result.reverse()
 
+proc setRecent(nimpkgs: var  NimPkgs) =
+  nimpkgs.recent = recent(nimpkgs.packages.keys.toSeq())
+
 proc updateNimPkgs(ctx: CrawlerContext) =
   createDir ctx.packagesPath
   createDir "repos"
+
   let
     oldNimpkgs =
       if fileExists ctx.nimpkgsPath:
@@ -125,73 +126,60 @@ proc updateNimPkgs(ctx: CrawlerContext) =
         NimPkgs()
     (packagesRev, packages) = getPackages()
     selected = filterPackageList(ctx, packages)
+    totalPackages = packages.len
 
-  var
-    nimpkgs: NimPkgs
-    pb = newProgressBar(packages.len)
-  for i in 0..<packages.len:
-    pb.show
-    updateNimPkg(packages[i], oldNimpkgs, nimpkgs, selected, pb, ctx)
-    inc pb
+  var nimpkgs: NimPkgs
+
+  with(Dots2, bb"fetching package info"):
+
+    for i, package in packages:
+      spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
+      addPkg nimpkgs, newNimPackage(package, oldNimpkgs, selected, ctx.packagesPath, ctx.all)
 
   nimpkgs.packagesHash = packagesRev.hash
   nimpkgs.updated = getTime()
-  nimpkgs.recent = recent(nimpkgs.packages.keys.toSeq())
-  echo nimpkgs.recent
+
+  setRecent nimpkgs
+
   writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
 
-# NOTE: does this need to be it's own proc?
-proc crawl() =
-  if ctx.dryrun:
-    echo "dryrun is a noop currently"
-  if ctx.check.len > 0 and ctx.all:
-    echo "-c/--check and -a/--all are mutually exclusive"
-    quit 1
-
-  updateNimPkgs ctx
- 
-
-when isMainModule:
-  import std/parseopt
-  const help = """
-  crawler [flags]
-
+hwylCli:
+  name "crawler"
   flags:
-    --nimpkgs     path to nimpkgs.json (default: ./nimpkgs.json)
-    --packages    directory to write package data (default: ./packages)
-    -c,--check    list of packages to force query
-    -n,--dryrun   only fetch remote commit info
-    -a,--all      check remote's for all packages
+    nimpkgs:
+      i nimpkgsPath
+      T string
+      ? "path to nimpkgs.json (default: ./nimpkgs.json)"
+      * "./nimpkgs.json"
+    packages:
+      i packagesPath
+      T string
+      ? "path to packages dir (default: ./packages)"
+      * "./packages"
+    check:
+      T seq[string]
+      ? "list of packages to force query"
+      - c
+    # dryrun:
+      # ? "only fetch remote commit info"
+      # - n
+    all:
+      ? "check remote's for all packages"
+      - a
+  run:
+    if check.len > 0 and all:
+      echo "-c/--check and -a/--all are mutually exclusive"
+      quit 1
 
-  examples:
-    crawler --check=,jsony,futhark
-    crawler -na
-  """
+    var ctx = CrawlerContext(
+      packagesPath: packagesPath,
+      nimpkgsPath: nimpkgsPath,
+      check: check,
+      all: all,
+      dryrun: false,
+    )
 
-  for kind, key, val in getopt(shortNoVal = {'a', 'n'}, longNoVal = @["all", "dryrun"]):
-    case kind
-    of cmdArgument:
-      echo "unexpected arg: ", key
-    of cmdLongOption, cmdShortOption:
-      case key
-      of "help","h":
-        echo help; quit 0
-      of "c","check":
-        if val.startsWith(","):
-          ctx.check &= val[1..^1].split(",")
-        else:
-          ctx.check.add val
-      of "nimpkgs":
-        ctx.nimpkgsPath = val
-      of "packages":
-        ctx.packagesPath = val
-      of "a","all":
-        ctx.all = true
-      of "n","dryrun":
-        ctx.dryrun = true
-      of "skip-recency":
-        ctx.skipRecent = true
-    of cmdEnd: discard
+    if ctx.dryrun:
+      echo "dryrun is a noop currently"
 
-  crawl()
-
+    updateNimPkgs ctx

@@ -7,8 +7,6 @@ from std/json import pretty
 
 import jsony
 
-import progress
-
 proc defaultEnv(): StringTableRef =
   result = newStringTable(mode = modeCaseSensitive)
   for k, v in envPairs():
@@ -157,7 +155,7 @@ proc gitClone*(pkg: NimPackage) =
     if errCode != 0:
       echo fmt"error cloning {pkg.name}"
 
-proc gitUpdateVersions(pkg: var NimPackage, pb: var ProgressBar) =
+proc gitUpdateVersions(pkg: var NimPackage) =
   # TODO: update to only go as deep as necessary with clone
   pkg.gitClone
   pkg.versions = @[]
@@ -168,9 +166,6 @@ proc gitUpdateVersions(pkg: var NimPackage, pb: var ProgressBar) =
       let s = refInfo.strip().split("|")
       if s.len < 2:
         echo "failed to get log for: ", pkg
-        pb.echo "ERROR-----"
-        pb.echo output
-        pb.echo "ERROR-----"
         return
       if s[1] != "":
         pkg.versions.add Version(
@@ -178,17 +173,17 @@ proc gitUpdateVersions(pkg: var NimPackage, pb: var ProgressBar) =
         )
   removeDir(pkg.repo.path)
 
-proc hgUpdateVersions(pkg: var NimPackage, pb: var ProgressBar) =
+proc hgUpdateVersions(pkg: var NimPackage) =
   ## mercurial repos are officially supported,
   ## but all existing packages are tagged deleted.
   raise newException(NimPkgCrawlerError, "hg support has not been implemented")
 
-proc updateVersions*(pkg: var NimPackage, pb: var ProgressBar) =
+proc updateVersions*(pkg: var NimPackage,) =
   case pkg.`method`
   of "git":
-    pkg.gitUpdateVersions(pb)
+    gitUpdateVersions pkg
   of "hg":
-    pkg.hgUpdateVersions(pb)
+    hgUpdateVersions pkg
 
 proc `|=`(b: var bool, x: bool) = b = b or x
 
@@ -225,8 +220,8 @@ proc parseRemotes*(remoteStr: string): seq[Remote] =
       continue
     result.add Remote(hash: s[0], `ref`: s[1])
 
-proc checkRemotes*(np: var NimPackage, pb: var ProgressBar): bool =
-  pb.status fmt"checking {np.name} for updated commits"
+proc checkRemotes*(np: var NimPackage): bool =
+  # echo fmt"checking {np.name} for updated commits"
   let (remoteResponse, code) = execCmdEx(fmt"git ls-remote {np.repo.url}", env = gitEnv)
   if code != 0:
     if remoteResponse.startswith("fatal: could not read Username") or

@@ -12,3 +12,4 @@ bin           = @["crawler"]
 
 requires "nim >= 2.0.0"
 requires "jsony"
+requires "https://github.com/daylinmorgan/hwylterm#HEAD"
