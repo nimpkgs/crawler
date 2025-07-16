@@ -62,6 +62,8 @@ proc newNimPackage(
 
   result = fromExisting(nimpkgs, package)
 
+  # TODO: propagate selected up to a higher level
+  # Selected/all should be incapsulated in a "force" param from a higher level
   if not result.deleted and (
     all or result.outOfDate or result.name in selected
     ):
