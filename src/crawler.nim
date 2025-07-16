@@ -1,7 +1,7 @@
 import std/[
     algorithm, httpclient, strformat, strutils,
     options, osproc, os, sequtils,
-    sets, tables, times
+    sets, tables, terminal, times
 ]
 import jsony, hwylterm, hwylterm/hwylcli
 import ./[packages]
@@ -133,7 +133,9 @@ proc updateNimPkgs(ctx: CrawlerContext) =
   with(Dots2, bb"fetching package info"):
 
     for i, package in packages:
-      spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
+      # BUG: spinner.setText sefaults if the spinner isn't actually active
+      if isatty(spinner.file):
+        spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
       addPkg nimpkgs, newNimPackage(package, oldNimpkgs, selected, ctx.packagesPath, ctx.all)
 
   nimpkgs.packagesHash = packagesRev.hash
