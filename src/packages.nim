@@ -47,7 +47,10 @@ type
     packagesHash*: string
     packages*: OrderedTable[string, NimPackage]
 
-proc addPkg*(nimpkgs: var NimPkgs, p: NimPackage) =
+proc addPkg*(nimpkgs: var NimPkgs, p: NimPackage) {.deprecated.} =
+  nimpkgs.packages[p.name] = p
+
+proc add*(nimpkgs: var  NimPkgs, p: NimPackage) =
   nimpkgs.packages[p.name] = p
 
 proc postHook*(np: var NimPackage) =
@@ -79,11 +82,12 @@ proc parseHook*(s: string, i: var int, v: var Time) =
   v = fromUnix(num)
 
 proc dumpHook*(s: var string, v: NimPackage | NimPkgs) =
+  ## special dumpHook to skip keys and any empty values
   s.add '{'
   var i = 0
   for k, e in v.fieldPairs:
-    when compiles(skipHook(type(v), k)):
-      when skipHook(type(v), k):
+    when compiles(skipHook(typeof(v), k)):
+      when skipHook(typeof(v), k):
         discard
       else:
         if not e.isNull():
@@ -185,7 +189,8 @@ proc updateVersions*(pkg: var NimPackage,) =
   of "hg":
     hgUpdateVersions pkg
 
-proc `|=`(b: var bool, x: bool) = b = b or x
+proc `|=`*(b: var bool, x: bool) =
+  b = b or x
 
 proc isInvalid*(pkg: NimPackage): bool =
   if "deleted" in pkg.tags:

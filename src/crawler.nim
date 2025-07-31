@@ -11,8 +11,7 @@ type
     nimpkgsPath = "./nimpkgs.json"
     packagesPath = "./packages"
     dryrun, all, skipRecent: bool
-    check: seq[string]
-    filtered: seq[string]
+    names: seq[string]
 
 const nimlangPackageUrl =
   "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
@@ -27,9 +26,8 @@ proc fetchPackageJson(): string =
 proc cmpPkgs*(a, b: Package): int =
   cmp(toLowerAscii($a.name), toLowerAscii($b.name))
 
-
 proc errQuitWithCode(code: int, args: varargs[string, `$`]) =
-  writeLine stderr, "ERROR: ", args.join("")
+  writeLine stderr, $bb"[b red]ERROR[/]: ", args.join("")
   quit code
 
 proc errQuit(args: varargs[string, `$`]) =
@@ -45,7 +43,6 @@ proc getPackages(): (Remote,seq[Package]) =
   packages.sort(cmpPkgs)
   return (packagesRev, packages)
 
-
 func fromExisting(nimpkgs: NimPkgs, package: Package): NimPackage =
   if package.name in nimpkgs.packages:
     result = nimpkgs.packages[package.name]
@@ -55,40 +52,30 @@ func fromExisting(nimpkgs: NimPkgs, package: Package): NimPackage =
   if result.isInvalid:
     result.deleted = true
 
-# TODO: refactor
-proc newNimPackage(
-    package: Package,
-    nimpkgs: NimPkgs,
-    selected: seq[string],
-    packagesPath: string,
-    all: bool,
-): NimPackage =
+proc update(ctx: CrawlerContext, p: var NimPackage): bool =
+  if p.deleted: return
+  if p.outOfDate or ctx.all:
+    if checkRemotes(p):
+      updateVersions p
+      return true
 
-  result = fromExisting(nimpkgs, package)
+func diff(filtered: seq[Package], requested: openArray[string]): seq[string] =
+  let names = filtered.mapIt(it.name).toHashSet
+  (names - requested.toHashSet).toSeq()
 
-  # TODO: propagate selected up to a higher level
-  # Selected/all should be incapsulated in a "force" param from a higher level
-  if not result.deleted and (
-    all or result.outOfDate or result.name in selected
-    ):
-      if checkRemotes(result):
-        updateVersions result
+proc filter(packages: seq[Package], ctx: CrawlerContext): seq[Package] =
+  if ctx.names.len == 0 or ctx.all:
+    return packages
 
-  dump result, packagesPath
+  for p in packages:
+    if p.name in ctx.names:
+      result.add p
 
-proc filterPackageList(
-    ctx: CrawlerContext,
-    packages: seq[Package]
-): seq[string] =
-  let
-    cliPkgs = ctx.check.toHashSet
-    officialPkgs = packages.mapIt(it.name).toHashSet
+  if result.len == 0:
+    errQuit "no packages matched selected names: ", ctx.names.join(";")
 
-  let unknown = (cliPkgs - officialPkgs).toSeq
-  if unknown.len > 0:
-    errQuit "unknownPackages: ", unknown.join(";")
-
-  result = (cliPkgs * officialPkgs).toSeq
+  if result.len != ctx.names.len:
+    errQuit "unknownPackages: ", diff(result, ctx.names).join(";")
 
 proc gitCmd(cmd: string): string =
   let (output, code) = execCmdEx cmd
@@ -119,38 +106,60 @@ proc recent(existing: seq[string]): seq[string] =
 proc setRecent(nimpkgs: var  NimPkgs) =
   nimpkgs.recent = recent(nimpkgs.packages.keys.toSeq())
 
+proc updateNimPackage(
+  ctx: CrawlerContext,
+  nimpkgs: var NimPkgs,
+  nimPackage: var NimPackage,
+) =
+  if update(ctx, nimPackage):
+    dump nimPackage, ctx.packagesPath
+  add nimpkgs, nimPackage
+
+proc dump(ctx: CrawlerContext, nimpkgs: NimPkgs) =
+  writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
+
+proc newNimPkgs(ctx: CrawlerContext): NimPkgs =
+  if fileExists ctx.nimpkgsPath:
+    result = readFile(ctx.nimpkgsPath).fromJson(typeof(result))
+
 proc updateNimPkgs(ctx: CrawlerContext) =
   createDir ctx.packagesPath
   createDir "repos"
 
-  let
-    oldNimpkgs =
-      if fileExists ctx.nimpkgsPath:
-        readFile(ctx.nimpkgsPath).fromJson(NimPkgs)
-      else:
-        NimPkgs()
-    (packagesRev, packages) = getPackages()
-    totalPackages = packages.len
+  let (packagesRev, packages) = getPackages()
+  let filteredPackages = packages.filter(ctx)
+  let totalPackages = filteredPackages.len
 
-
-  var nimpkgs: NimPkgs
+  var nimpkgs = newNimPkgs(ctx)
   nimpkgs.packagesHash = packagesRev.hash
-
-  let selected = filterPackageList(ctx, packages)
 
   with(Dots2, bb"fetching package info"):
 
-    for i, package in packages:
+    for i, package in filteredPackages:
+
       # BUG: spinner.setText segfaults if the spinner isn't actually active
-      if isatty(spinner.file):
+      if spinner.running:
         spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
-      addPkg nimpkgs, newNimPackage(package, oldNimpkgs, selected, ctx.packagesPath, ctx.all)
+
+      var nimPackage = fromExisting(nimpkgs, package)
+      updateNimPackage ctx, nimpkgs, nimPackage
 
   nimpkgs.updated = getTime()
 
   setRecent nimpkgs
+  dump ctx, nimpkgs
 
-  writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
+proc checkPaths(ctx: CrawlerContext) =
+  if getEnv("BOOTSTRAP_NIMPKGS") != "":
+    return
+
+  var bail = false
+
+  bail |= not ctx.nimpkgsPath.fileExists
+  bail |= not ctx.packagesPath.dirExists
+
+  if bail:
+    errQuit bb"expected existing [b]nimpkgs[/] registry, run with [b]BOOTSTRAP_NIMPKGS[/] to created needed files/directories"
 
 let ctxDefault = CrawlerContext()
 
@@ -167,10 +176,9 @@ hwylCli:
       T string
       ? "path to packages dir (default: ./packages)"
       * ctxDefault.packagesPath
-    check:
+    names:
       T seq[string]
-      ? "list of packages to force query"
-      - c
+      ? "list of packages to check"
     # dryrun:
       # ? "only fetch remote commit info"
       # - n
@@ -178,19 +186,16 @@ hwylCli:
       ? "check remote's for all packages"
       - a
   run:
-    if check.len > 0 and all:
-      echo "-c/--check and -a/--all are mutually exclusive"
+    if names.len > 0 and all:
+      echo "--names and -a/--all are mutually exclusive"
       quit 1
 
     var ctx = CrawlerContext(
       packagesPath: packagesPath,
       nimpkgsPath: nimpkgsPath,
-      check: check,
+      names: names,
       all: all,
-      dryrun: false,
     )
 
-    if ctx.dryrun:
-      echo "dryrun is a noop currently"
-
+    checkPaths ctx
     updateNimPkgs ctx
