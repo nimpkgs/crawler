@@ -43,11 +43,19 @@ proc getPackages(): (Remote,seq[Package]) =
   packages.sort(cmpPkgs)
   return (packagesRev, packages)
 
-func fromExisting(nimpkgs: NimPkgs, package: Package): NimPackage =
+# TODO: do I need to be "dumping here"
+proc fromExisting(ctx: CrawlerContext, nimpkgs: NimPkgs, package: Package): NimPackage =
   if package.name in nimpkgs.packages:
     result = nimpkgs.packages[package.name]
+
+    # if a new package has been generated then we need to fetch version info anew
+    if result.url != package.url:
+      result <- package
+      result.outOfDate = true
+      dump result, ctx.packagesPath
   else:
     result <- package
+    dump result, ctx.packagesPath
 
   if result.isInvalid:
     result.deleted = true
@@ -141,7 +149,7 @@ proc updateNimPkgs(ctx: CrawlerContext) =
       if spinner.running:
         spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
 
-      var nimPackage = fromExisting(nimpkgs, package)
+      var nimPackage = fromExisting(ctx, nimpkgs, package)
       updateNimPackage ctx, nimpkgs, nimPackage
 
   nimpkgs.updated = getTime()
