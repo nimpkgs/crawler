@@ -144,10 +144,7 @@ proc updateNimPkgs(ctx: CrawlerContext) =
   with(Dots2, bb"fetching package info"):
 
     for i, package in filteredPackages:
-
-      # BUG: spinner.setText segfaults if the spinner isn't actually active
-      if spinner.running:
-        spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
+      spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
 
       var nimPackage = fromExisting(ctx, nimpkgs, package)
       updateNimPackage ctx, nimpkgs, nimPackage
