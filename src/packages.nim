@@ -211,7 +211,6 @@ proc dump*(p: var NimPackage, dir: string) =
 
 proc recent*(r: seq[Remote]): Remote =
   if r.len == 0:
-    echo "OH NO"
     raise newException(ValueError, "remotes is length 0")
   r[0]
 
