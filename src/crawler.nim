@@ -27,15 +27,19 @@ proc fetchPackageJson(): string =
 proc cmpPkgs*(a, b: Package): int =
   cmp(toLowerAscii($a.name), toLowerAscii($b.name))
 
-proc errQuit(args: varargs[string,`$`], code = 1) =
-  writeLine(stderr, "ERROR: ", args.join(""))
+
+proc errQuitWithCode(code: int, args: varargs[string, `$`]) =
+  writeLine stderr, "ERROR: ", args.join("")
   quit code
+
+proc errQuit(args: varargs[string, `$`]) =
+  errQuitWithCode 1, args
 
 proc getPackages(): (Remote,seq[Package]) =
   let
     (remoteResponse, code) = execCmdEx(fmt"git ls-remote https://github.com/nim-lang/packages", env = gitEnv)
   if code != 0:
-    errQuit("failed to get nim-lang/packages revision", code)
+    errQuitWithCode code, "failed to get nim-lang/packages revision"
   let packagesRev = remoteResponse.parseRemotes().recent()
   var packages = fetchPackageJson().fromJson(seq[Package])
   packages.sort(cmpPkgs)
@@ -82,8 +86,7 @@ proc filterPackageList(
 
   let unknown = (cliPkgs - officialPkgs).toSeq
   if unknown.len > 0:
-    echo "unknownPackages: ", unknown.join(";")
-    quit 1
+    errQuit "unknownPackages: ", unknown.join(";")
 
   result = (cliPkgs * officialPkgs).toSeq
 
@@ -127,10 +130,13 @@ proc updateNimPkgs(ctx: CrawlerContext) =
       else:
         NimPkgs()
     (packagesRev, packages) = getPackages()
-    selected = filterPackageList(ctx, packages)
     totalPackages = packages.len
 
+
   var nimpkgs: NimPkgs
+  nimpkgs.packagesHash = packagesRev.hash
+
+  let selected = filterPackageList(ctx, packages)
 
   with(Dots2, bb"fetching package info"):
 
@@ -140,7 +146,6 @@ proc updateNimPkgs(ctx: CrawlerContext) =
         spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
       addPkg nimpkgs, newNimPackage(package, oldNimpkgs, selected, ctx.packagesPath, ctx.all)
 
-  nimpkgs.packagesHash = packagesRev.hash
   nimpkgs.updated = getTime()
 
   setRecent nimpkgs
