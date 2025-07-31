@@ -147,6 +147,8 @@ proc updateNimPkgs(ctx: CrawlerContext) =
 
   writeFile(ctx.nimpkgsPath, nimpkgs.toJson())
 
+let ctxDefault = CrawlerContext()
+
 hwylCli:
   name "crawler"
   flags:
@@ -154,12 +156,12 @@ hwylCli:
       i nimpkgsPath
       T string
       ? "path to nimpkgs.json (default: ./nimpkgs.json)"
-      * "./nimpkgs.json"
+      * ctxDefault.nimpkgsPath
     packages:
       i packagesPath
       T string
       ? "path to packages dir (default: ./packages)"
-      * "./packages"
+      * ctxDefault.packagesPath
     check:
       T seq[string]
       ? "list of packages to force query"
