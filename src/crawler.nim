@@ -135,7 +135,7 @@ proc updateNimPkgs(ctx: CrawlerContext) =
   with(Dots2, bb"fetching package info"):
 
     for i, package in packages:
-      # BUG: spinner.setText sefaults if the spinner isn't actually active
+      # BUG: spinner.setText segfaults if the spinner isn't actually active
       if isatty(spinner.file):
         spinner.setText fmt"package [[{i}/{totalPackages}]: {package.name}"
       addPkg nimpkgs, newNimPackage(package, oldNimpkgs, selected, ctx.packagesPath, ctx.all)
