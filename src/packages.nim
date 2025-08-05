@@ -71,7 +71,7 @@ proc recentlyUpdated(np: NimPackage, duration = initDuration(days = 7)): bool =
 
 # continue to maintain status in nimpkgs.json / packages/{package}.json
 proc postHook*(np: var NimPackage) =
-  if np.status in Alias..Unreachable:
+  if np.status in Alias..Deleted:
     return
 
   if np.recentlyUpdated or np.noCommitData:
@@ -244,6 +244,7 @@ proc parseRemotes*(remoteStr: string): seq[Remote] =
 
 # TODO: this could be Result[bool, string] to continue (with an optional --continue flag to ignore errors?)
 proc checkRemotes*(np: var NimPackage): bool =
+  if np.status in Alias..Deleted: return # nothing to check for these...
   let (remoteResponse, code) = execCmdEx(fmt"git ls-remote {np.repo.url}", env = gitEnv)
   # TODO: replace with Result to propagate up these errors
   if code != 0:
