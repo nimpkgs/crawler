@@ -20,6 +20,16 @@
       "checksums": {
         "sha1": "6aeb83e7481ca8686396a568096054bc668294df"
       }
+    },
+    "resultz": {
+      "version": "0.1.0",
+      "vcsRevision": "5b83318700b9cca39e06ad2ee7a6e6db0a432ad0",
+      "url": "https://github.com/daylinmorgan/resultz",
+      "downloadMethod": "git",
+      "dependencies": [],
+      "checksums": {
+        "sha1": "28d0296dcdb4b23e0b7b29cd9af9893f12bd1063"
+      }
     }
   },
   "tasks": {}
