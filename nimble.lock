@@ -21,14 +21,14 @@
         "sha1": "6aeb83e7481ca8686396a568096054bc668294df"
       }
     },
-    "resultz": {
-      "version": "0.1.0",
-      "vcsRevision": "5b83318700b9cca39e06ad2ee7a6e6db0a432ad0",
-      "url": "https://github.com/daylinmorgan/resultz",
+    "results": {
+      "version": "0.5.1",
+      "vcsRevision": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
+      "url": "https://github.com/arnetheduck/nim-results",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "28d0296dcdb4b23e0b7b29cd9af9893f12bd1063"
+        "sha1": "a9c011f74bc9ed5c91103917b9f382b12e82a9e7"
       }
     }
   },

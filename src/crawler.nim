@@ -1,19 +1,9 @@
 import std/[
-    os, sequtils, strformat, strutils,
+    algorithm, os, sequtils, strformat, strutils,
     sets, tables, terminal, times,
 ]
-import jsony, hwylterm, hwylterm/hwylcli
+import jsony, hwylterm, hwylterm/hwylcli, results
 import ./[packages, lib]
-
-type
-  Paths = tuple
-    nimpkgs = "./nimpkgs.json"
-    packages = "./packages"
-
-  CrawlerContext = object
-    # nimpkgs: NimPkgs
-    paths: Paths
-    force: seq[string]
 
 proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
@@ -21,39 +11,54 @@ proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
     dump package, ctx.paths.packages
   writeFile(ctx.paths.nimpkgs, nimpkgs.toJson())
 
-proc checkRequestedNames(nimpkgs: NimPkgs, names: seq[string]) =
-  let knownPackages = nimpkgs.packages.keys().toSeq().toHashSet()
-  let unknownPackages = names.toHashSet() - knownPackages
-  if unknownPackages.len > 0:
-    errQuit "unknown packages: ", unknownPackages.toSeq().join(";")
+proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): seq[string] =
+  var names, unknown: HashSet[string]
+  if ctx.check.len == 0:
+    return nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
+  for n in ctx.check:
+    case n
+    of "@all":
+      names.incl nimpkgs.getValidPackages().toHashSet()
+    of "@unreachable":
+      names.incl nimpkgs.getUnreachablePackages().toHashSet()
+    else:
+      if n notin nimpkgs.packages:
+        unknown.incl n
+      else:
+        names.incl n
+  if unknown.len > 0:
+    errQuit "unknown package(s): ", unknown.toSeq().join(";")
+
+  names.toSeq().sorted(cmpPkgs)
+
+proc handleError(spinner: Spinny, ctx: CrawlerContext, e: string): bool {.discardable.} =
+  if not ctx.ignoreError:
+    errQuit spinner, e
+  else:
+    showError spinner, e
 
 proc checkForCommits(ctx: CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
-  let names =
-    if ctx.force == @["@all"]:
-      nimpkgs.getValidPackages()
-    elif ctx.force.len > 0:
-      checkRequestedNames nimpkgs, ctx.force
-      ctx.force
-    else:
-      nimpkgs.getOutOfDatePackages()
-
+  let names = collectNames(ctx, nimpkgs)
   echo bbfmt"checking for new commits on [b]{names.len}[/] packages"
-
   with(Dots2, "checking commits"):
     for i, name in names:
-      spinner.setText(fmt"[{i}/{names.len}] " &  name.bb("yellow"))
-      if nimpkgs[name].checkRemotes():
+      spinner.setText(bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]")
+      let r = nimpkgs[name].checkRemotes().mapPkgErr(name)
+      let toUpdate = nimpkgs[name].checkRemotes().mapPkgErr(name).valueOr:
+        handleError spinner, ctx, error
+      if toUpdate:
         result.add name
 
 proc checkForTags(ctx: CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]) =
   echo bbfmt"checking for new tags in [b]{names.len}[/] packages"
-
   with(Dots2, bb"fetching package info"):
-
     for i, name in names:
-      spinner.setText bbfmt"[[{i}/{names.len}] [yellow]{name}[/]"
-      updateVersions nimpkgs[name]
-      # dump nimpkgs[name], ctx.paths.packages
+      spinner.setText bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]"
+      nimpkgs[name]
+        .updateVersions()
+        .mapPkgErr(name)
+        .isOkOr:
+          handleError(spinner, ctx, error)
 
 proc update(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   let names = checkForCommits(ctx, nimpkgs)
@@ -63,19 +68,20 @@ proc update(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   else:
     echo "no packages need to be checked for new tags"
 
-  setRecent nimpkgs
+  setRecent(nimpkgs).bail("failed to set recent packages")
 
 proc checkPaths(ctx: CrawlerContext, bootstrap: bool) =
   if bootstrap: return
 
-  var bail = false
+  var toBail = false
 
-  bail |= not ctx.paths.nimpkgs.fileExists
-  bail |= not ctx.paths.packages.dirExists
+  toBail |= not ctx.paths.nimpkgs.fileExists
+  toBail |= not ctx.paths.packages.dirExists
 
-  if bail:
+  if toBail:
     errQuit bb"expected existing [b]nimpkgs[/] registry, " &
       bb"run with [b]--bootstrap[/] to create needed files/directories"
+
 
 let ctxDefault = CrawlerContext()
 
@@ -98,18 +104,28 @@ hwylCli:
       ? "packages to force update"
       - f
       T seq[string]
+    check:
+      ? "packages to check remote refs"
+      T seq[string]
+    `continue`:
+      ? "ignore errors"
+      i ignoreError
+      - c
 
   run:
+
     var ctx = CrawlerContext(
       paths: (nimpkgsPath, packagesPath),
       force: force,
+      check: if check.len == 0 and force.len != 0: force else: check,
+      ignoreError: ignoreError
     )
 
     checkPaths ctx, bootstrap
     createDir ctx.paths.packages
     createDir "repos"
 
-    var nimpkgs = newNimPkgs(ctx.paths.nimpkgs)
+    var nimpkgs = newNimPkgs(ctx).bail()
     update ctx, nimpkgs
     dump ctx, nimpkgs
 

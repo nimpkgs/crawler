@@ -1,11 +1,12 @@
 import std/[
-    algorithm, httpclient, options, os, osproc, sequtils,
-    sets, strformat, strtabs, strutils, tables, times,
+    algorithm, httpclient, options,
+    os, osproc, sequtils,
+    sets, strformat, strtabs,
+    strutils, tables, times,
 ]
 from std/json import pretty
-
-import jsony
-
+import jsony, results
+export results
 import ./lib
 
 
@@ -20,10 +21,12 @@ proc defaultEnv(): StringTableRef =
 let gitEnv* = defaultEnv()
 
 type
-  NimPkgCrawlerError* = object of CatchableError
-
   Remote* = object
     hash*, `ref`*: string
+
+  Commit = object
+    hash: string
+    time: Time
 
   Version = object
     tag*, hash*: string
@@ -34,12 +37,15 @@ type
     license*, web*, doc*, alias*: string
     tags*: seq[string]
 
+  GitRepo = object
+    url*, path*: string
+
   NimPackageStatus* = enum # order matters here since ranges are used
     Unknown,
     OutOfDate,
     UpToDate,
-    Alias,
     Unreachable,
+    Alias,
     Deleted
 
   NimPackage* = object
@@ -57,6 +63,8 @@ type
     packagesHash*: string
     packages*: OrderedTable[string, NimPackage]
 
+  R[T] = Result[T, string] # all errors used should be simple strings
+
 func contains(nimpkgs: var NimPkgs, p: Package): bool =
   p.name in nimpkgs.packages
 
@@ -71,7 +79,7 @@ proc recentlyUpdated(np: NimPackage, duration = initDuration(days = 7)): bool =
 
 # continue to maintain status in nimpkgs.json / packages/{package}.json
 proc postHook*(np: var NimPackage) =
-  if np.status in Alias..Deleted:
+  if np.status in {Unreachable, Alias, Deleted}:
     return
 
   if np.recentlyUpdated or np.noCommitData:
@@ -143,77 +151,99 @@ proc map*(np: var NimPackage, p: Package) =
 
 proc `<-`*(np: var NimPackage, p: Package) {.inline.} = map np, p
 
-proc repo(pkg: NimPackage): tuple[url: string, path: string] =
+func mapPkgErr*[T](self: R[T], name: string): R[T] {.inline.} =
+  self.prependError(fmt"failure for package, {name}")
+
+proc repo(pkg: NimPackage): GitRepo =
   result.url =
     if "?subdir=" in pkg.url: pkg.url.split("?subdir=")[0]
     else: pkg.url
   let s = result.url.split("/")
   result.path = "repos" / s[^2..^1].join("-") & ".git"
 
-proc gitLastestCommit*(pkg: var NimPackage) =
-  let (output, code) =
-    execCmdEx(
-      fmt"git --git-dir={pkg.repo.path} show --format='%H|%ct' -s",
-      options = {poUsePath},
-    )
-  if code != 0:
-    echo output
-    echo fmt"error fetching last commit for {pkg.name}"
-    return
+proc git(cmd: string): tuple[output: string, exitCode: int] =
+  result = execCmdEx(fmt"git {cmd}", env = gitEnv)
+
+
+proc latestCommit(repo: GitRepo): R[Commit] =
+  let (output, code) = git(fmt"--git-dir={repo.path} show --format='%H|%ct' -s")
   let s = output.strip().split("|")
-  pkg.lastCommitHash = s[0]
-  pkg.lastCommitTime = fromUnix(parseInt(s[1]))
+  if code != 0 or s.len != 2:
+    return err fmt"failed to get most recent commit from local repo {repo.path}, see below".appendError(output)
+  try:
+    ok Commit(hash: s[0], time: fromUnix(parseInt(s[1])))
+  except:
+    err fmt"failed to parse time: `{s[1]}`"
 
-proc gitLog*(pkg: NimPackage): string =
+
+proc setLastestCommit(pkg: var NimPackage): R[void] =
+  let commit = ?pkg.repo.latestCommit()
+  pkg.lastCommitHash = commit.hash
+  pkg.lastCommitTime = commit.time
+  ok()
+
+# should these git commands be gitAsResult?
+
+proc log(repo: GitRepo): R[string] =
   let cmd =
-    fmt"git --git-dir={pkg.repo.path} log --format='%H|%D|%ct'" &
+    fmt"--git-dir={repo.path} log --format='%H|%D|%ct'" &
     " --decorate-refs='refs/tags/v*.*' --tags --no-walk"
-  let (output, code) = execCmdEx(cmd, options = {poUsePath})
+  let (output, code) = git(cmd)
   if code != 0:
-    echo cmd
-    echo output
-    echo fmt"error fetching history for package: {pkg}"
-  return output
+    return err "git log failed, see output below".appendError(output)
+  ok output
 
-proc gitClone*(pkg: NimPackage) =
-  let (url, path) = pkg.repo()
-  if not dirExists path:
-    let (_, errCode) = execCmdEx fmt"git clone --filter=tree:0 --bare {url} {path}"
-    if errCode != 0:
-      echo fmt"error cloning {pkg.name}"
+proc clone(repo: GitRepo): R[void] =
+  # BUG: doesn't properly handle case where repo already exists
+  if not dirExists repo.path:
+    let (output, code) = git(fmt"clone --filter=tree:0 --bare {repo.url} {repo.path}")
+    if code != 0:
+      return err fmt"failed to clone {repo.url} to {repo.path}, see output below".appendError(output)
+  ok()
 
-proc gitUpdateVersions(pkg: var NimPackage) =
-  # TODO: update to only go as deep as necessary with clone
-  pkg.gitClone
-  pkg.versions = @[]
-  pkg.gitLastestCommit
-  if pkg.lastCommitTime == fromUnix(0):
-    quit fmt"pkg: {pkg.name} failed to update last commit time?"
-  let output = pkg.gitLog
-  if output != "":
-    for refInfo in output.strip().split("\n"):
-      let s = refInfo.strip().split("|")
-      if s.len < 2:
-        echo "failed to get log for: ", pkg
-        return
-      if s[1] != "":
-        pkg.versions.add Version(
-          hash: s[0], time: fromUnix(parseInt(s[2])), tag: s[1].replace("tag: ", "")
+proc splitLine(line: string): R[array[3, string]] =
+  let s = line.strip().split("|")
+  if s.len != 3:
+    return err fmt"failed to parse version from line: {line}"
+  result.ok [s[0], s[1], s[2]]
+
+proc parseVersionsFromLog(log: string): R[seq[Version]] =
+  var vs: seq[Version]
+  for line in log.strip.splitLines:
+    let info = ?line.splitLine()
+    try:
+      if info[1] != "":
+        vs.add Version(
+          hash: info[0],
+          time: fromUnix(parseInt(info[2])),
+          tag: info[1].replace("tag: ", "")
         )
+    except:
+      return err "failed to parse versions" & getCurrentExceptionMsg()
+  ok vs
+
+proc gitUpdateVersions(pkg: var NimPackage): R[void] =
+  pkg.versions = @[]
+  ?pkg.repo.clone()
+  ?pkg.setLastestCommit
+  let output = ?pkg.repo.log()
+  if output != "":
+    pkg.versions = ?parseVersionsFromLog(output)
   pkg.status = UpToDate
   removeDir(pkg.repo.path)
+  ok()
 
-proc hgUpdateVersions(pkg: var NimPackage) =
+proc hgUpdateVersions(pkg: var NimPackage): R[void] =
   ## mercurial repos are officially supported,
   ## but all existing packages are tagged deleted.
-  raise newException(NimPkgCrawlerError, "hg support has not been implemented")
+  return err "mercurial repositories are not currently supported"
 
-proc updateVersions*(pkg: var NimPackage) =
+proc updateVersions*(pkg: var NimPackage): R[void] =
   case pkg.`method`
   of "git":
-    gitUpdateVersions pkg
+    result = gitUpdateVersions pkg
   of "hg":
-    hgUpdateVersions pkg
+    result = hgUpdateVersions pkg
 
 proc `|=`*(b: var bool, x: bool) =
   b = b or x
@@ -227,12 +257,7 @@ proc clearExtras(p: NimPackage): NimPackage =
 proc dump*(p: NimPackage, dir: string) =
   writeFile(dir / p.name & ".json", p.clearExtras().toJson().fromJson().pretty())
 
-proc recent*(r: seq[Remote]): Remote =
-  if r.len == 0:
-    raise newException(ValueError, "remotes is length 0")
-  r[0]
-
-proc parseRemotes*(remoteStr: string): seq[Remote] =
+proc parseRemoteRefs(remoteStr: string): seq[Remote] =
   for line in remoteStr.strip().split("\n"):
     # TODO: warn me or log it?
     if line.startswith("warning"):
@@ -242,27 +267,54 @@ proc parseRemotes*(remoteStr: string): seq[Remote] =
       continue
     result.add Remote(hash: s[0], `ref`: s[1])
 
-# TODO: this could be Result[bool, string] to continue (with an optional --continue flag to ignore errors?)
-proc checkRemotes*(np: var NimPackage): bool =
-  if np.status in Alias..Deleted: return # nothing to check for these...
-  let (remoteResponse, code) = execCmdEx(fmt"git ls-remote {np.repo.url}", env = gitEnv)
-  # TODO: replace with Result to propagate up these errors
+proc recentRemote(np: NimPackage, response: string): R[Remote] =
+  let remotes = parseRemoteRefs(response)
+  if remotes.len != 0:
+    return ok remotes[0]
+  err "could not parse remote refs from git ls-remote: \n" & response
+
+proc recentRemote(response: string): R[Remote] =
+  let remotes = parseRemoteRefs(response)
+  if remotes.len != 0:
+    return ok remotes[0]
+  err "could not parse remote refs from git ls-remote: \n" & response
+
+proc remoteIsUnreachable(response: string): R[bool] =
+  ## false in this context is for the caller,
+  ## returning false is for an expected case in which the repo is considered unreachable
+  template test(cond: bool) =
+    if cond: return ok false
+
+  test response.startswith("fatal: could not read Username")
+  test response.strip().endsWith("not found")
+  test ("Could not resolve host:" in response)
+  test ("SSL certificate problem" in response)
+  test ("The requested URL returned error: 502" in response)
+  test ("TLS connect error" in response)
+
+  err "unable to interpret git ls-remote, see below:\n" & response.strip()
+
+proc lsRemote(r: GitRepo): tuple[output: string, exitCode: int] =
+  result = git(fmt"ls-remote {r.url}")
+
+proc compare(np: var NimPackage, remote: Remote): bool =
+  if np.lastCommitHash == remote.hash:
+    np.status = UpToDate
+    return
+
+  np.status = OutOfDate
+  np.lastCommitHash = remote.hash
+  return true
+
+proc checkRemotes*(np: var NimPackage): R[bool] =
+  if np.status in Alias..Deleted:
+    return ok false # nothing to check for these so noop...
+  let (lsRemoteOutput, code) = np.repo.lsRemote()
   if code != 0:
     np.status = Unreachable
-    if remoteResponse.startswith("fatal: could not read Username") or
-        remoteResponse.strip().endsWith("not found") or
-        ("Could not resolve host:" in remoteResponse) or
-        ("SSL certificate problem" in remoteResponse) or
-        ("The requested URL returned error: 502" in remoteResponse):
-      return
-    else:
-      quit "\n\nunexpected result parsing below:\n" & remoteResponse & "\nfor package: " & $np
-
-  let recentRemote = parseRemotes(remoteResponse).recent()
-  if np.lastCommitHash != recentRemote.hash:
-    np.status = OutOfDate
-    result = true
-    np.lastCommitHash = recentRemote.hash
+    return remoteIsUnreachable(lsRemoteOutput)
+  let remote = ?recentRemote(lsRemoteOutput)
+  ok compare(np, remote)
 
 const nimlangPackageUrl =
   "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
@@ -274,22 +326,33 @@ proc fetchPackageJson(): string =
   finally:
     close client
 
-proc cmpPkgs*(a, b: Package): int =
-  cmp(toLowerAscii(a.name), toLowerAscii(b.name))
+proc cmpPkgs*(a:string, b: string): int =
+  cmp(toLowerAscii(a), toLowerAscii(b))
 
+proc cmpPkgs*(a, b: Package): int =
+  cmpPkgs(a.name, b.name)
+
+# TODO: bubble up an error?
 proc getOfficialPackages*(): (Remote,seq[Package]) =
+  let repo = GitRepo(url: "https://github.com/nim-lang/packages")
   let
-    (remoteResponse, code) = execCmdEx(fmt"git ls-remote https://github.com/nim-lang/packages", env = gitEnv)
+    (remoteResponse, code) = repo.lsRemote()
   if code != 0:
-    errQuitWithCode code, "failed to get nim-lang/packages revision"
-  let packagesRev = remoteResponse.parseRemotes().recent()
+    errQuitWithCode code, "failed to get nim-lang/packages revision: \n" & remoteResponse
+  let packagesRev = recentRemote(remoteResponse).expect("couldn't get remote ref for official packages")
   var packages = fetchPackageJson().fromJson(seq[Package])
   packages.sort(cmpPkgs)
   return (packagesRev, packages)
 
-proc initNimPkgs(path: string): NimPkgs =
+proc initNimPkgs(path: string): R[NimPkgs] =
   if fileExists path:
-    result = readFile(path).fromJson(typeof(result))
+    try:
+      return ok readFile(path).fromJson(NimPkgs)
+    except:
+      return err "failed to load existing nimpkgs, see below".appendError(getCurrentExceptionMsg())
+
+  ok NimPkgs()
+
 
 proc `*`(p: Package): NimPackage =
   ## generate a NimPackage anew
@@ -301,47 +364,56 @@ proc `[]`(np: var NimPkgs, p: Package): var NimPackage =
 proc `<-`(np: var NimPkgs, p: Package) =
   if p notin np:
     np.add *p
+  # a new url means new commits/tags
   elif np[p].url != p.url:
     np.add *p
 
 proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
   np.packages[name]
 
-proc newNimPkgs*(path: string): Nimpkgs =
-  result = initNimPkgs(path)
+proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
+  var nimpkgs = ?initNimPkgs(ctx.paths.nimpkgs)
   let (rev, officialPackages) = getOfficialPackages()
-  result.packagesHash = rev.hash
+  nimpkgs.packagesHash = rev.hash
   for p in officialPackages:
-    result <- p
+    # TODO: handle unknown names
+    if p.name in ctx.force:
+      nimpkgs.add *p
+    else:
+      nimpkgs <- p
 
-proc gitCmd(cmd: string): string =
-  let (output, code) = execCmdEx cmd
-  result = output
-  if code != 0:
-    echo "failed to run cmd: " & cmd
-    echo "output\n:" & output
-    quit 1
+  ok nimpkgs
 
 func packageFilesFromGitOutput(output: string): seq[string] =
   output.splitLines().filterIt(it.startsWith("packages/"))
 
-proc recentPackages(existing: seq[string]): seq[string] =
-  ## brute force attempt to establish the most recent packages added to packages.json
 
-  let lsFilesOutput = gitCmd("git ls-files --others --exclude-standard")
-  let logOutput = gitCmd("git log --pretty'' --name-only")
+proc gitAsResult(cmd: string): R[string] =
+  let (output, code) = git(cmd)
+  if code != 0:
+    return err fmt"cmd: `git {cmd}` failed, see output".appendError(output)
+  ok output
+
+# Result?
+proc recentPackages(existing: seq[string]): R[seq[string]] =
+  ## brute force attempt to establish the most recent packages added to packages.json
+  let lsFilesOutput = ?gitAsResult("ls-files --others --exclude-standard")
+  let logOutput = ?gitAsResult("log --pretty'' --name-only")
   var paths = packageFilesFromGitOutput(lsFilesOutput & logOutput)
+  # why am I reversing twice?
   paths.reverse()
-  result = paths
+  paths = paths
     .toOrderedSet()
     .toSeq()[^10..^1]
     .mapIt(it.replace("packages/","")
     .replace(".json",""))
     .filterIt(it in existing)
-  result.reverse()
+  paths.reverse()
+  ok paths
 
-proc setRecent*(nimpkgs: var  NimPkgs) =
-  nimpkgs.recent = recentPackages(nimpkgs.packages.keys.toSeq())
+proc setRecent*(nimpkgs: var  NimPkgs): R[void] =
+  nimpkgs.recent = ?recentPackages(nimpkgs.packages.keys.toSeq())
+  ok()
 
 proc getOutOfDatePackages*(nimpkgs: NimPkgs): seq[string] =
   for name, pkg in nimpkgs.packages.pairs():
@@ -350,7 +422,10 @@ proc getOutOfDatePackages*(nimpkgs: NimPkgs): seq[string] =
 
 proc getValidPackages*(nimpkgs: NimPkgs): seq[string] =
   for name, pkg in nimpkgs.packages.pairs():
-    if pkg.status notin Alias..Deleted:
+    if pkg.status notin {Unreachable, Alias, Deleted}:
       result.add name
 
-
+proc getUnreachablePackages*(nimpkgs: NimPkgs): seq[string] =
+  for name, pkg in nimpkgs.packages.pairs():
+    if pkg.status == Unreachable:
+      result.add name
