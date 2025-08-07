@@ -24,13 +24,13 @@ type
   Remote* = object
     hash*, `ref`*: string
 
-  Commit = object
+  Commit* = object
     hash: string
-    time: Time
+    time: int # unix timestamp
 
   Version = object
     tag*, hash*: string
-    time*: Time
+    time*: int
 
   Package* = object
     name*, url*, `method`*, description*: string
@@ -51,8 +51,7 @@ type
   NimPackage* = object
     name*, url*, `method`*, description*,
       license*, web*, doc*, alias*: string
-    lastCommitHash*: string
-    lastCommitTime*: Time
+    commit*: Commit
     versions*: seq[Version]
     tags*: seq[string]
     status*: NimPackageStatus
@@ -72,7 +71,10 @@ func add*(nimpkgs: var NimPkgs, p: NimPackage) =
   nimpkgs.packages[p.name] = p
 
 func noCommitData(np: NimPackage): bool =
-  np.lastCommitTime == fromUnix(0)
+  np.commit.time == 0
+
+proc lastCommitTime(np: NimPackage): Time =
+  np.commit.time.fromUnix()
 
 proc recentlyUpdated(np: NimPackage, duration = initDuration(days = 7)): bool =
   (getTime() - np.lastCommitTime) < duration
@@ -82,7 +84,7 @@ proc postHook*(np: var NimPackage) =
   if np.status in {Unreachable, Alias, Deleted}:
     return
 
-  if np.recentlyUpdated or np.noCommitData:
+  if np.noCommitData or np.recentlyUpdated:
     np.status = OutOfDate
 
 proc skipHook*(T: typedesc[NimPackage], key: static string): bool =
@@ -101,6 +103,7 @@ proc isNull[A, B](v: OrderedTable[A, B]): bool =
   v.len() == 0
 proc isNull(v: NimPackageStatus): bool = 
   v == Unknown # error check this instead?
+proc isNull(v: Commit): bool = v.hash == "" and v.time == 0
 proc dumpHook(s: var string, v: Time) = s.add $v.toUnix()
 
 proc parseHook*(s: string, i: var int, v: var Time) =
@@ -180,14 +183,12 @@ proc latestCommit(repo: GitRepo): R[Commit] =
   if s.len != 2:
     return err errMsgPrefix.appendError(fmt"expected sequence of len 2, got: {s}")
   try:
-    ok Commit(hash: s[0], time: fromUnix(parseInt(s[1])))
+    ok Commit(hash: s[0], time: parseInt(s[1]))
   except:
-    err fmt"failed to parse time: `{s[1]}`"
+    err fmt"failed to parse time as integer: `{s[1]}`"
 
 proc setLastestCommit(pkg: var NimPackage): R[void] =
-  let commit = ?pkg.repo.latestCommit()
-  pkg.lastCommitHash = commit.hash
-  pkg.lastCommitTime = commit.time
+  pkg.commit = ?pkg.repo.latestCommit()
   ok()
 
 proc log(repo: GitRepo): R[string] =
@@ -218,7 +219,7 @@ proc parseVersionsFromLog(log: string): R[seq[Version]] =
       if info[1] != "":
         vs.add Version(
           hash: info[0],
-          time: fromUnix(parseInt(info[2])),
+          time: parseInt(info[2]),
           tag: info[1].replace("tag: ", "")
         )
     except:
@@ -253,8 +254,7 @@ proc `|=`*(b: var bool, x: bool) =
 
 proc clearExtras(p: NimPackage): NimPackage =
   result = p
-  result.lastCommitHash = ""
-  result.lastCommitTime = Time()
+  result.commit = Commit()
   result.status = Unknown
 
 proc dump*(p: NimPackage, dir: string) =
@@ -295,12 +295,13 @@ proc lsRemote(r: GitRepo): tuple[output: string, exitCode: int] =
   result = git(fmt"ls-remote {r.url}")
 
 proc compare(np: var NimPackage, remote: Remote): bool =
-  if np.lastCommitHash == remote.hash:
+  if np.commit.hash == remote.hash:
     np.status = UpToDate
     return
 
   np.status = OutOfDate
-  np.lastCommitHash = remote.hash
+  np.commit.hash = remote.hash
+  np.commit.time = 0 # does this make sense?
   return true
 
 proc checkRemotes*(np: var NimPackage): R[bool] =
