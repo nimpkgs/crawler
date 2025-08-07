@@ -43,9 +43,12 @@ proc checkForCommits(ctx: CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
   with(Dots2, "checking commits"):
     for i, name in names:
       spinner.setText(bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]")
-      let r = nimpkgs[name].checkRemotes().mapPkgErr(name)
-      let toUpdate = nimpkgs[name].checkRemotes().mapPkgErr(name).valueOr:
-        handleError spinner, ctx, error
+      let toUpdate =
+        nimpkgs[name]
+        .checkRemotes()
+        .mapPkgErr(name)
+        .valueOr:
+          handleError spinner, ctx, error
       if toUpdate:
         result.add name
 

@@ -155,6 +155,7 @@ func mapPkgErr*[T](self: R[T], name: string): R[T] {.inline.} =
   self.prependError(fmt"failure for package, {name}")
 
 proc repo(pkg: NimPackage): GitRepo =
+  assert pkg.status != Alias
   result.url =
     if "?subdir=" in pkg.url: pkg.url.split("?subdir=")[0]
     else: pkg.url
@@ -164,17 +165,24 @@ proc repo(pkg: NimPackage): GitRepo =
 proc git(cmd: string): tuple[output: string, exitCode: int] =
   result = execCmdEx(fmt"git {cmd}", env = gitEnv)
 
+proc gitResult(cmd: string): R[string] =
+  let (output, code) = git(cmd)
+  if code != 0:
+    return err fmt"cmd: `git {cmd}` failed with exit code {code}".appendError(output)
+  ok output
 
 proc latestCommit(repo: GitRepo): R[Commit] =
-  let (output, code) = git(fmt"--git-dir={repo.path} show --format='%H|%ct' -s")
+  let errMsgPrefix = fmt"failed to get most recent commit from local repo, {repo.path}"
+  let output =
+    ?gitResult(fmt"--git-dir={repo.path} show --format='%H|%ct' -s")
+    .prependError(errMsgPrefix)
   let s = output.strip().split("|")
-  if code != 0 or s.len != 2:
-    return err fmt"failed to get most recent commit from local repo {repo.path}, see below".appendError(output)
+  if s.len != 2:
+    return err errMsgPrefix.appendError(fmt"expected sequence of len 2, got: {s}")
   try:
     ok Commit(hash: s[0], time: fromUnix(parseInt(s[1])))
   except:
     err fmt"failed to parse time: `{s[1]}`"
-
 
 proc setLastestCommit(pkg: var NimPackage): R[void] =
   let commit = ?pkg.repo.latestCommit()
@@ -182,23 +190,18 @@ proc setLastestCommit(pkg: var NimPackage): R[void] =
   pkg.lastCommitTime = commit.time
   ok()
 
-# should these git commands be gitAsResult?
-
 proc log(repo: GitRepo): R[string] =
   let cmd =
     fmt"--git-dir={repo.path} log --format='%H|%D|%ct'" &
     " --decorate-refs='refs/tags/v*.*' --tags --no-walk"
-  let (output, code) = git(cmd)
-  if code != 0:
-    return err "git log failed, see output below".appendError(output)
-  ok output
+  gitResult(cmd)
 
 proc clone(repo: GitRepo): R[void] =
   # BUG: doesn't properly handle case where repo already exists
   if not dirExists repo.path:
-    let (output, code) = git(fmt"clone --filter=tree:0 --bare {repo.url} {repo.path}")
-    if code != 0:
-      return err fmt"failed to clone {repo.url} to {repo.path}, see output below".appendError(output)
+    discard
+      ?gitResult(fmt"clone --filter=tree:0 --bare {repo.url} {repo.path}")
+      .prependError(fmt"failed to clone {repo.url} to {repo.path}")
   ok()
 
 proc splitLine(line: string): R[array[3, string]] =
@@ -267,12 +270,6 @@ proc parseRemoteRefs(remoteStr: string): seq[Remote] =
       continue
     result.add Remote(hash: s[0], `ref`: s[1])
 
-proc recentRemote(np: NimPackage, response: string): R[Remote] =
-  let remotes = parseRemoteRefs(response)
-  if remotes.len != 0:
-    return ok remotes[0]
-  err "could not parse remote refs from git ls-remote: \n" & response
-
 proc recentRemote(response: string): R[Remote] =
   let remotes = parseRemoteRefs(response)
   if remotes.len != 0:
@@ -333,16 +330,16 @@ proc cmpPkgs*(a, b: Package): int =
   cmpPkgs(a.name, b.name)
 
 # TODO: bubble up an error?
-proc getOfficialPackages*(): (Remote,seq[Package]) =
+proc getOfficialPackages*(): R[(Remote,seq[Package])] =
   let repo = GitRepo(url: "https://github.com/nim-lang/packages")
   let
     (remoteResponse, code) = repo.lsRemote()
   if code != 0:
-    errQuitWithCode code, "failed to get nim-lang/packages revision: \n" & remoteResponse
-  let packagesRev = recentRemote(remoteResponse).expect("couldn't get remote ref for official packages")
+    return err "failed to get nim-lang/packages revision".appendError(remoteResponse)
+  let packagesRev = ?recentRemote(remoteResponse).prependError("couldn't get remote ref for official packages")
   var packages = fetchPackageJson().fromJson(seq[Package])
   packages.sort(cmpPkgs)
-  return (packagesRev, packages)
+  return ok((packagesRev, packages))
 
 proc initNimPkgs(path: string): R[NimPkgs] =
   if fileExists path:
@@ -373,7 +370,7 @@ proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
 
 proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
   var nimpkgs = ?initNimPkgs(ctx.paths.nimpkgs)
-  let (rev, officialPackages) = getOfficialPackages()
+  let (rev, officialPackages) = ?getOfficialPackages()
   nimpkgs.packagesHash = rev.hash
   for p in officialPackages:
     # TODO: handle unknown names
@@ -387,18 +384,10 @@ proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
 func packageFilesFromGitOutput(output: string): seq[string] =
   output.splitLines().filterIt(it.startsWith("packages/"))
 
-
-proc gitAsResult(cmd: string): R[string] =
-  let (output, code) = git(cmd)
-  if code != 0:
-    return err fmt"cmd: `git {cmd}` failed, see output".appendError(output)
-  ok output
-
-# Result?
 proc recentPackages(existing: seq[string]): R[seq[string]] =
   ## brute force attempt to establish the most recent packages added to packages.json
-  let lsFilesOutput = ?gitAsResult("ls-files --others --exclude-standard")
-  let logOutput = ?gitAsResult("log --pretty'' --name-only")
+  let lsFilesOutput = ?gitResult("ls-files --others --exclude-standard")
+  let logOutput = ?gitResult("log --pretty'' --name-only")
   var paths = packageFilesFromGitOutput(lsFilesOutput & logOutput)
   # why am I reversing twice?
   paths.reverse()

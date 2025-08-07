@@ -23,10 +23,8 @@ proc appendError*(s1, s2: string; count: Natural = 2): string =
   result.add s1
   result.add ":\n"
   for (l, final) in s2.splitLinesFinal():
-    result.add if final: "┴ " else: "│ "
+    result.add if final: "╰ " else: "│ "
     result.add l
-  # result.add "\n"
-  # result.add "┴"
 
 proc prependError*[T, E](self: Result[T,E], s: string): Result[T, E] {.inline.} =
   self.mapErr(proc(e: string): string = s.appendError(e))
