@@ -42,6 +42,7 @@ proc checkForCommits(ctx: CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
   echo bbfmt"checking for new commits on [b]{names.len}[/] packages"
   with(Dots2, "checking commits"):
     for i, name in names:
+      # possible the spinner is slowing it down...
       spinner.setText(bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]")
       let toUpdate =
         nimpkgs[name]

@@ -174,21 +174,33 @@ proc gitResult(cmd: string): R[string] =
     return err fmt"cmd: `git {cmd}` failed with exit code {code}".appendError(output)
   ok output
 
-proc latestCommit(repo: GitRepo): R[Commit] =
-  let errMsgPrefix = fmt"failed to get most recent commit from local repo, {repo.path}"
-  let output =
-    ?gitResult(fmt"--git-dir={repo.path} show --format='%H|%ct' -s")
-    .prependError(errMsgPrefix)
-  let s = output.strip().split("|")
+proc processGitShow(showOutput: string): R[Commit] =
+  var filtered: seq[string]
+  for l in showOutput.strip().splitLines():
+    if l.startsWith("warning"):
+      if l.startsWith("warning: redirecting"):
+        continue
+      else:
+        return err fmt"unknown warning from git: `{l}`"
+    else: filtered.add l
+  if filtered.len != 1:
+    return err fmt"unexpected number of lines, expected 1, got: {filtered}"
+  let s = filtered[0].strip().split("|")
   if s.len != 2:
-    return err errMsgPrefix.appendError(fmt"expected sequence of len 2, got: {s}")
+    return err fmt"expected sequence of len 2, got: {s}"
   try:
     ok Commit(hash: s[0], time: parseInt(s[1]))
   except:
     err fmt"failed to parse time as integer: `{s[1]}`"
 
 proc setLastestCommit(pkg: var NimPackage): R[void] =
-  pkg.commit = ?pkg.repo.latestCommit()
+  let errMsgPrefix = fmt"failed to get most recent commit from local repo, {pkg.repo.path}"
+  let output =
+    ?gitResult(fmt"--git-dir={pkg.repo.path} show --format='%H|%ct' -s")
+    .prependError(errMsgPrefix)
+  pkg.commit =
+    ?processGitShow(output)
+    .prependError(errMsgPrefix)
   ok()
 
 proc log(repo: GitRepo): R[string] =
