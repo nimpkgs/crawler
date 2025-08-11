@@ -1,6 +1,6 @@
 # Package
 
-version       = "2025.1003"
+version       = "2025.1004"
 author        = "Daylin Morgan"
 description   = "nimpkgs crawler"
 license       = "MIT"
