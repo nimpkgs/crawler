@@ -17,7 +17,7 @@ proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): seq[string] =
     return nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
   for n in ctx.check:
     case n
-    of "@all":
+    of "@valid":
       names.incl nimpkgs.getValidPackages().toHashSet()
     of "@unreachable":
       names.incl nimpkgs.getUnreachablePackages().toHashSet()
