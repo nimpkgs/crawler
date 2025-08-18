@@ -9,6 +9,7 @@ type
 
   CrawlerContext* = object
     # nimpkgs: NimPkgs
+    spinner*: Spinny
     paths*: Paths
     force*, check*: seq[string]
     ignoreError*: bool
@@ -33,7 +34,7 @@ proc showError*(args: varargs[string, `$`]) =
   writeLine stderr, $bb"[b red]ERROR[/]: ", args.join("")
 
 proc showError*(spinner: Spinny, args: varargs[string, `$`]) =
-  spinner.write bb"[b red]ERROR[/]: " & args.join("")
+  spinner.echo bb"[b red]ERROR[/]: " & args.join("")
 
 proc errQuitWithCode*(code: int, args: varargs[string, `$`]) =
   writeLine stderr, $bb"[b red]ERROR[/]: ", args.join("")
@@ -59,3 +60,12 @@ proc bail*[T,E](r: Result[T, E], msg: string = ""): T =
     else:
       errQuit errVal
 
+proc newProgress*(ctx: var CrawlerContext): Progress =
+  ctx.spinner = newSpinny()
+  result = newProgress(segments = @[Bar, Fraction])
+
+proc handleError*(ctx: CrawlerContext, e: string): bool {.discardable.} =
+  if not ctx.ignoreError:
+    errQuit ctx.spinner, e
+  else:
+    showError ctx.spinner, e

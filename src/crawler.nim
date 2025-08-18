@@ -1,9 +1,10 @@
 import std/[
     algorithm, os, sequtils, strformat, strutils,
-    sets, tables, terminal, times,
+    sets, tables, times,
 ]
 import jsony, hwylterm, hwylterm/hwylcli, results
 import ./[packages, lib]
+
 
 proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
@@ -31,40 +32,33 @@ proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): seq[string] =
 
   names.toSeq().sorted(cmpPkgs)
 
-proc handleError(spinner: Spinny, ctx: CrawlerContext, e: string): bool {.discardable.} =
-  if not ctx.ignoreError:
-    errQuit spinner, e
-  else:
-    showError spinner, e
-
-proc checkForCommits(ctx: CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
+proc checkForCommits(ctx: var CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
   let names = collectNames(ctx, nimpkgs)
   echo bbfmt"checking for new commits on [b]{names.len}[/] packages"
-  with(Dots2, "checking commits"):
-    for i, name in names:
-      # possible the spinner is slowing it down...
-      spinner.setText(bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]")
-      let toUpdate =
-        nimpkgs[name]
-        .checkRemotes()
-        .mapPkgErr(name)
-        .valueOr:
-          handleError spinner, ctx, error
-      if toUpdate:
-        result.add name
-
-proc checkForTags(ctx: CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]) =
-  echo bbfmt"checking for new tags in [b]{names.len}[/] packages"
-  with(Dots2, bb"fetching package info"):
-    for i, name in names:
-      spinner.setText bbfmt"[[{i+1}/{names.len}] [yellow]{name}[/]"
+  # var spinner = newSpinny("")
+  var p = newProgress(ctx)
+  for name in p.progress(names):
+    let toUpdate =
       nimpkgs[name]
-        .updateVersions()
-        .mapPkgErr(name)
-        .isOkOr:
-          handleError(spinner, ctx, error)
+      .checkRemotes()
+      .mapPkgErr(name)
+      .valueOr:
+        handleError ctx, error
+    if toUpdate:
+      result.add name
 
-proc update(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
+proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]) =
+  echo bbfmt"checking for new tags in [b]{names.len}[/] packages"
+
+  var p = newProgress(ctx)
+  for name in p.progress(names):
+    nimpkgs[name]
+      .updateVersions()
+      .mapPkgErr(name)
+      .isOkOr:
+        handleError(ctx, error)
+
+proc update(ctx: var CrawlerContext, nimpkgs: var NimPkgs) =
   let names = checkForCommits(ctx, nimpkgs)
 
   if names.len > 0:
