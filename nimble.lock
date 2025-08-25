@@ -3,12 +3,12 @@
   "packages": {
     "hwylterm": {
       "version": "0.1.0",
-      "vcsRevision": "fad08b8cdef6394c343cc7e65ffb9df0f307cf7e",
+      "vcsRevision": "bf3412b766bc2f0427d2a0bafb6e97779ed0d67a",
       "url": "https://github.com/daylinmorgan/hwylterm",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "f480ba7b5640151c081c3e30affd971180dd7be0"
+        "sha1": "d5850f0ed951e50562f7800bc28ca45b0e20f7b3"
       }
     },
     "jsony": {
@@ -21,14 +21,14 @@
         "sha1": "6aeb83e7481ca8686396a568096054bc668294df"
       }
     },
-    "results": {
-      "version": "0.5.1",
-      "vcsRevision": "df8113dda4c2d74d460a8fa98252b0b771bf1f27",
-      "url": "https://github.com/arnetheduck/nim-results",
+    "resultz": {
+      "version": "0.1.0",
+      "vcsRevision": "0be681c97c703a602e80d203ba2698c29e212e4c",
+      "url": "https://github.com/daylinmorgan/resultz",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "a9c011f74bc9ed5c91103917b9f382b12e82a9e7"
+        "sha1": "72fc674d50343c74538441024bc21beb33a9edde"
       }
     }
   },

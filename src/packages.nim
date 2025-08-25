@@ -5,8 +5,8 @@ import std/[
     strutils, tables, times,
 ]
 from std/json import pretty
-import jsony, results
-export results
+import jsony, resultz
+export resultz
 import ./lib
 
 
@@ -61,8 +61,6 @@ type
     recent*: seq[string]
     packagesHash*: string
     packages*: OrderedTable[string, NimPackage]
-
-  R[T] = Result[T, string] # all errors used should be simple strings
 
 func contains(nimpkgs: var NimPkgs, p: Package): bool =
   p.name in nimpkgs.packages
@@ -188,10 +186,9 @@ proc processGitShow(showOutput: string): R[Commit] =
   let s = filtered[0].strip().split("|")
   if s.len != 2:
     return err fmt"expected sequence of len 2, got: {s}"
-  try:
-    ok Commit(hash: s[0], time: parseInt(s[1]))
-  except:
-    err fmt"failed to parse time as integer: `{s[1]}`"
+
+  attempt(fmt"failed to parse time as integer: `{s[1]}`"):
+    return ok Commit(hash: s[0], time: parseInt(s[1]))
 
 proc setLastestCommit(pkg: var NimPackage): R[void] =
   let errMsgPrefix = fmt"failed to get most recent commit from local repo, {pkg.repo.path}"
@@ -227,15 +224,13 @@ proc parseVersionsFromLog(log: string): R[seq[Version]] =
   var vs: seq[Version]
   for line in log.strip.splitLines:
     let info = ?line.splitLine()
-    try:
+    attempt"failed to parse versions":
       if info[1] != "":
         vs.add Version(
           hash: info[0],
           time: parseInt(info[2]),
           tag: info[1].replace("tag: ", "")
         )
-    except:
-      return err "failed to parse versions" & getCurrentExceptionMsg()
   ok vs
 
 proc gitUpdateVersions(pkg: var NimPackage): R[void] =
@@ -356,10 +351,8 @@ proc getOfficialPackages*(): R[(Remote,seq[Package])] =
 
 proc initNimPkgs(path: string): R[NimPkgs] =
   if fileExists path:
-    try:
+    attempt("failed to load existing nimpkgs, see below"):
       return ok readFile(path).fromJson(NimPkgs)
-    except:
-      return err "failed to load existing nimpkgs, see below".appendError(getCurrentExceptionMsg())
 
   ok NimPkgs()
 

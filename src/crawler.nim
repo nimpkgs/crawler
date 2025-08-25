@@ -2,9 +2,8 @@ import std/[
     algorithm, os, sequtils, strformat, strutils,
     sets, tables, times,
 ]
-import jsony, hwylterm, hwylterm/hwylcli, results
+import jsony, hwylterm, hwylterm/hwylcli, resultz
 import ./[packages, lib]
-
 
 proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
@@ -12,10 +11,10 @@ proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
     dump package, ctx.paths.packages
   writeFile(ctx.paths.nimpkgs, nimpkgs.toJson())
 
-proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): seq[string] =
+proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
   var names, unknown: HashSet[string]
   if ctx.check.len == 0:
-    return nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
+    return ok nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
   for n in ctx.check:
     case n
     of "@valid":
@@ -28,27 +27,27 @@ proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): seq[string] =
       else:
         names.incl n
   if unknown.len > 0:
-    errQuit "unknown package(s): ", unknown.toSeq().join(";")
+    return err "unknown package(s): " & unknown.toSeq().join(";")
 
-  names.toSeq().sorted(cmpPkgs)
+  ok(names.toSeq().sorted(cmpPkgs))
 
-proc checkForCommits(ctx: var CrawlerContext, nimpkgs: var Nimpkgs): seq[string] =
-  let names = collectNames(ctx, nimpkgs)
-  echo bbfmt"checking for new commits on [b]{names.len}[/] packages"
-  # var spinner = newSpinny("")
+proc checkForCommits(ctx: var CrawlerContext, nimpkgs: var Nimpkgs, names: seq[string]): R[seq[string]] =
+  hecho bbfmt"checking for new commits on [b]{names.len}[/] packages"
+
+  var toCheck: seq[string]
   var p = newProgress(ctx)
   for name in p.progress(names):
-    let toUpdate =
-      nimpkgs[name]
-      .checkRemotes()
-      .mapPkgErr(name)
-      .valueOr:
-        handleError ctx, error
-    if toUpdate:
-      result.add name
+    case nimpkgs[name].checkRemotes().mapPkgErr(name)
+    of Ok(hasNewCommits):
+      if hasNewCommits:
+        toCheck.add name
+    of Err(e):
+      handleError ctx, e
 
-proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]) =
-  echo bbfmt"checking for new tags in [b]{names.len}[/] packages"
+  ok toCheck
+
+proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]): R[void] =
+  hecho bbfmt"checking for new tags in [b]{names.len}[/] packages"
 
   var p = newProgress(ctx)
   for name in p.progress(names):
@@ -56,17 +55,20 @@ proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[stri
       .updateVersions()
       .mapPkgErr(name)
       .isOkOr:
-        handleError(ctx, error)
+        handleError ctx, error
+
+  ok()
 
 proc update(ctx: var CrawlerContext, nimpkgs: var NimPkgs) =
-  let names = checkForCommits(ctx, nimpkgs)
+  let names = collectNames(ctx, nimpkgs).bail()
+  let outOfDatePkgs= checkForCommits(ctx, nimpkgs, names).bail("failure to check for new commits")
 
-  if names.len > 0:
-    checkForTags ctx, nimpkgs, names
+  if outOfDatePkgs.len > 0:
+    checkForTags(ctx, nimpkgs, outOfDatePkgs).bail("failure to get updated tags")
   else:
-    echo "no packages need to be checked for new tags"
+    hecho "no packages need to be checked for new tags"
 
-  setRecent(nimpkgs).bail("failed to set recent packages")
+  setRecent(nimpkgs).bail("failure to set recent packages")
 
 proc checkPaths(ctx: CrawlerContext, bootstrap: bool) =
   if bootstrap: return
