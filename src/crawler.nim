@@ -87,6 +87,7 @@ let ctxDefault = CrawlerContext()
 
 hwylCli:
   name "crawler"
+  settings LongHelp, InferEnv
   flags:
     nimpkgs:
       i nimpkgsPath

@@ -45,7 +45,7 @@
           version = "unstable";
           src = ./.;
           buildInputs = [ pkgs.openssl ];
-          nimbleDepsHash = "sha256-NtuwQcLQU4K8MKb9XCWVK5Prs61uKJ1j1HA6PFoibyU=";
+          nimbleDepsHash = "sha256-XLLaeTdJlWPQneE79IOTNdMXYkfI+MvBhNBqExDzd0M=";
         };
       });
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
