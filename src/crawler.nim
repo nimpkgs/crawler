@@ -9,6 +9,14 @@ proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
   for _, package in nimpkgs.packages.pairs:
     dump package, ctx.paths.packages
+
+  # subset package versions to only the latest and drop some of the metadata
+  for _, package in nimpkgs.packages.mpairs:
+    package.method = ""
+    package.license = ""
+    if package.versions.len > 1:
+      package.versions = @[package.versions[0]]
+
   writeFile(ctx.paths.nimpkgs, nimpkgs.toJson())
 
 proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
@@ -61,7 +69,7 @@ proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[stri
 
 proc update(ctx: var CrawlerContext, nimpkgs: var NimPkgs) =
   let names = collectNames(ctx, nimpkgs).bail()
-  let outOfDatePkgs= checkForCommits(ctx, nimpkgs, names).bail("failure to check for new commits")
+  let outOfDatePkgs = checkForCommits(ctx, nimpkgs, names).bail("failure to check for new commits")
 
   if outOfDatePkgs.len > 0:
     checkForTags(ctx, nimpkgs, outOfDatePkgs).bail("failure to get updated tags")

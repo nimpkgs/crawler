@@ -62,6 +62,9 @@ type
     packagesHash*: string
     packages*: OrderedTable[string, NimPackage]
 
+func path(ctx: CrawlerContext, p: NimPackage): string =
+  ctx.paths.packages / p.name & ".json"
+
 func contains(nimpkgs: var NimPkgs, p: Package): bool =
   p.name in nimpkgs.packages
 
@@ -261,11 +264,14 @@ proc `|=`*(b: var bool, x: bool) =
 
 proc clearExtras(p: NimPackage): NimPackage =
   result = p
-  result.commit = Commit()
   result.status = Unknown
 
+proc toPrettyJson(p: NimPackage): string =
+  ## roundtrip jsony serialization and std/json deserialization to get pretty string
+  p.toJson().fromJson().pretty()
+
 proc dump*(p: NimPackage, dir: string) =
-  writeFile(dir / p.name & ".json", p.clearExtras().toJson().fromJson().pretty())
+  writeFile(dir / p.name & ".json", p.clearExtras().toPrettyJson())
 
 proc parseRemoteRefs(remoteStr: string): seq[Remote] =
   for line in remoteStr.strip().split("\n"):
@@ -356,8 +362,7 @@ proc initNimPkgs(path: string): R[NimPkgs] =
 
   ok NimPkgs()
 
-
-proc `*`(p: Package): NimPackage =
+proc toNimPackage(p: Package): NimPackage =
   ## generate a NimPackage anew
   result <- p
 
@@ -365,25 +370,36 @@ proc `[]`(np: var NimPkgs, p: Package): var NimPackage =
   np.packages[p.name]
 
 proc `<-`(np: var NimPkgs, p: Package) =
+  # new package!
   if p notin np:
-    np.add *p
-  # a new url means new commits/tags
+    np.add p.toNimPackage
+  # a new url means means we start over commits/tags
   elif np[p].url != p.url:
-    np.add *p
+    np.add p.toNimPackage
 
 proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
   np.packages[name]
 
+proc loadExisting(ctx: CrawlerContext, pkg: var NimPackage) =
+  let path = ctx.path(pkg)
+  if fileExists(path):
+    let existing = fromJson(readFile(path), NimPackage)
+    pkg.method = existing.method
+    pkg.versions = existing.versions
+
 proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
   var nimpkgs = ?initNimPkgs(ctx.paths.nimpkgs)
   let (rev, officialPackages) = ?getOfficialPackages()
+
   nimpkgs.packagesHash = rev.hash
+
   for p in officialPackages:
-    # TODO: handle unknown names
     if p.name in ctx.force:
-      nimpkgs.add *p
+      nimpkgs.add p.toNimPackage
     else:
       nimpkgs <- p
+
+    loadExisting ctx, nimpkgs[p]
 
   ok nimpkgs
 
