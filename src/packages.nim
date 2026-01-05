@@ -129,7 +129,7 @@ proc isNull(v: NimPackageStatus): bool =
   v == UpToDate # error check this instead?
 proc isNull(v: Commit): bool = v.hash == "" and v.time == 0
 proc isNull(v: int): bool = v == 0
-proc dumpHook(s: var string, v: Time) = s.add $v.toUnix()
+proc dumpHook*(s: var string, v: Time) = s.add $v.toUnix()
 
 proc parseHook*(s: string, i: var int, v: var Time) =
   var num: int
@@ -400,9 +400,6 @@ proc toNimPackage(p: Package): NimPackage =
   ## generate a NimPackage anew
   result <- p
 
-proc `[]`(np: var NimPkgs, p: Package): var NimPackage =
-  np.packages[p.name]
-
 # result?
 proc loadFromExisting(ctx: CrawlerContext, pkg: var NimPackage): R[void] =
   let path = ctx.path(pkg)
@@ -420,16 +417,15 @@ proc loadFromExisting(ctx: CrawlerContext, pkg: var NimPackage): R[void] =
 proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
   np.packages[name]
 
-
 proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
-  # let old = ?initNimPkgs(ctx.paths.nimpkgs)
   var nimpkgs = NimPkgs()
   let (rev, officialPackages) = ?getOfficialPackages()
   nimpkgs.packagesHash = rev.hash
 
   for p in officialPackages:
-    nimpkgs.add p.toNimPackage
-    ?loadFromExisting(ctx, nimpkgs[p])
+    var pkg = p.toNimPackage
+    ?loadFromExisting(ctx, pkg)
+    nimpkgs.add pkg
 
   ok nimpkgs
 

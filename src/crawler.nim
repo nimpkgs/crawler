@@ -5,6 +5,21 @@ import std/[
 import jsony, hwylterm, hwylterm/hwylcli, resultz
 import ./[packages, lib]
 
+# TODO: refactor so this object is created at dump time...
+
+type
+  NimPkgsSimple* = object
+    updated*: Time
+    recent*: seq[string]
+    packagesHash*: string
+    packages*: seq[NimPackage] # only this one needs to be a table?
+
+proc simplify(nimpkgs: NimPkgs): NimpkgsSimple =
+  result.updated = getTime()
+  result.recent = nimpkgs.recent
+  result.packages = nimpkgs.packages.values().toSeq()
+  result.packagesHash = nimpkgs.packagesHash
+
 proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
 
@@ -12,7 +27,9 @@ proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   for _, package in nimpkgs.packages.mpairs:
     package.setTimes()
     package.clearMetadataForIndex()
-  writeFile(ctx.paths.nimpkgs, nimpkgs.toJson())
+
+  let simple = nimpkgs.simplify()
+  writeFile(ctx.paths.nimpkgs, simple.toJson())
 
 proc cleanup(ctx: CrawlerContext, nimpkgs: NimPkgs) =
   for (_, path) in walkDir(ctx.paths.packages):
