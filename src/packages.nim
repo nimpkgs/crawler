@@ -94,6 +94,8 @@ func clearMetadataForIndex*(np: var NimPackage) =
   np.commit = Commit()
   np.method = ""
   np.license = ""
+  np.web = ""
+  np.doc = ""
   if np.versions.len >= 1:
     np.versions = @[np.versions[0]]
 
@@ -386,19 +388,18 @@ proc getOfficialPackages*(): R[(Remote,seq[Package])] =
   packages.sort(cmpPkgs)
   return ok((packagesRev, packages))
 
-proc initNimPkgs(path: string): R[NimPkgs] =
-  if fileExists path:
-    attempt("failed to load existing nimpkgs, see below"):
-      return ok readFile(path).fromJson(NimPkgs)
-
-  ok NimPkgs()
+# built from scratch each time now...
+# proc initNimPkgs(path: string): R[NimPkgs] =
+#   if fileExists path:
+#     attempt("failed to load existing nimpkgs, see below"):
+#       return ok readFile(path).fromJson(NimPkgs)
+#
+#   ok NimPkgs()
 
 proc toNimPackage(p: Package): NimPackage =
   ## generate a NimPackage anew
   result <- p
 
-proc `[]`(np: NimPkgs, p: Package): NimPackage =
-  np.packages[p.name]
 proc `[]`(np: var NimPkgs, p: Package): var NimPackage =
   np.packages[p.name]
 
@@ -421,7 +422,7 @@ proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
 
 
 proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
-  let old = ?initNimPkgs(ctx.paths.nimpkgs)
+  # let old = ?initNimPkgs(ctx.paths.nimpkgs)
   var nimpkgs = NimPkgs()
   let (rev, officialPackages) = ?getOfficialPackages()
   nimpkgs.packagesHash = rev.hash
