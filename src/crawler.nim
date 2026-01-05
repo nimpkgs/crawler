@@ -7,17 +7,19 @@ import ./[packages, lib]
 
 proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   nimpkgs.updated = getTime()
-  for _, package in nimpkgs.packages.pairs:
-    dump package, ctx.paths.packages
 
-  # subset package versions to only the latest and drop some of the metadata
+  # before dumping the full index we drop some of the metadata
   for _, package in nimpkgs.packages.mpairs:
-    package.method = ""
-    package.license = ""
-    if package.versions.len > 1:
-      package.versions = @[package.versions[0]]
-
+    package.setTimes()
+    package.clearMetadataForIndex()
   writeFile(ctx.paths.nimpkgs, nimpkgs.toJson())
+
+proc cleanup(ctx: CrawlerContext, nimpkgs: NimPkgs) =
+  for (_, path) in walkDir(ctx.paths.packages):
+    let name = path.splitFile.name
+    if name notin nimpkgs.packages:
+      echo fmt"removing individual package data for: {name}"
+      removeFile path
 
 proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
   var names, unknown: HashSet[string]
@@ -51,6 +53,7 @@ proc checkForCommits(ctx: var CrawlerContext, nimpkgs: var Nimpkgs, names: seq[s
         toCheck.add name
     of Err(e):
       handleError ctx, e
+    dump nimpkgs[name], ctx.paths.packages
 
   ok toCheck
 
@@ -64,6 +67,8 @@ proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[stri
       .mapPkgErr(name)
       .isOkOr:
         handleError ctx, error
+
+    dump nimpkgs[name], ctx.paths.packages
 
   ok()
 
@@ -137,4 +142,5 @@ hwylCli:
     var nimpkgs = newNimPkgs(ctx).bail()
     update ctx, nimpkgs
     dump ctx, nimpkgs
+    cleanup ctx, nimpkgs
 

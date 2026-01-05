@@ -40,12 +40,13 @@ type
   GitRepo = object
     url*, path*: string
 
-  NimPackageStatus* = enum # order matters here since ranges are used
-    Unknown,
-    OutOfDate,
+  # Should the default status actually be UpToDate?
+  NimPackageStatus* = enum
     UpToDate,
-    Unreachable,
+    OutOfDate,
+    Unknown,
     Alias,
+    Unreachable,
     Deleted
 
   NimPackage* = object
@@ -55,6 +56,8 @@ type
     versions*: seq[Version]
     tags*: seq[string]
     status*: NimPackageStatus
+    commitTime*: int
+    versionTime*: int
 
   NimPkgs* = object
     updated*: Time
@@ -80,8 +83,26 @@ proc lastCommitTime(np: NimPackage): Time =
 proc recentlyUpdated(np: NimPackage, duration = initDuration(days = 7)): bool =
   (getTime() - np.lastCommitTime) < duration
 
-# continue to maintain status in nimpkgs.json / packages/{package}.json
+func setTimes*(np: var NimPackage) =
+  np.commitTime = np.commit.time
+
+  # TODO: no need for version time
+  if np.versions.len >= 1:
+    np.versionTime = np.versions[0].time
+
+func clearMetadataForIndex*(np: var NimPackage) =
+  np.commit = Commit()
+  np.method = ""
+  np.license = ""
+  if np.versions.len >= 1:
+    np.versions = @[np.versions[0]]
+
 proc postHook*(np: var NimPackage) =
+  if np.alias != "":
+    np.status = Alias
+  elif "deleted" in np.tags:
+    np.status = Deleted
+
   if np.status in {Unreachable, Alias, Deleted}:
     return
 
@@ -102,9 +123,10 @@ proc isNull(v: Time): bool = v == Time()
 proc isNull(v: bool): bool = not v
 proc isNull[A, B](v: OrderedTable[A, B]): bool =
   v.len() == 0
-proc isNull(v: NimPackageStatus): bool = 
-  v == Unknown # error check this instead?
+proc isNull(v: NimPackageStatus): bool =
+  v == UpToDate # error check this instead?
 proc isNull(v: Commit): bool = v.hash == "" and v.time == 0
+proc isNull(v: int): bool = v == 0
 proc dumpHook(s: var string, v: Time) = s.add $v.toUnix()
 
 proc parseHook*(s: string, i: var int, v: var Time) =
@@ -150,8 +172,10 @@ proc map*(np: var NimPackage, p: Package) =
   np.tags = p.tags
   if "deleted" in p.tags:
     np.status = Deleted
-  if np.alias != "":
+  elif np.alias != "":
     np.status = Alias
+  else:
+    np.status = Unknown
 
 proc `<-`*(np: var NimPackage, p: Package) {.inline.} = map np, p
 
@@ -247,6 +271,7 @@ proc gitUpdateVersions(pkg: var NimPackage): R[void] =
   removeDir(pkg.repo.path)
   ok()
 
+
 proc hgUpdateVersions(pkg: var NimPackage): R[void] =
   ## mercurial repos are officially supported,
   ## but all existing packages are tagged deleted.
@@ -255,23 +280,29 @@ proc hgUpdateVersions(pkg: var NimPackage): R[void] =
 proc updateVersions*(pkg: var NimPackage): R[void] =
   case pkg.`method`
   of "git":
-    result = gitUpdateVersions pkg
+    gitUpdateVersions(pkg)
   of "hg":
-    result = hgUpdateVersions pkg
+    hgUpdateVersions(pkg)
+  else:
+    err "missing method"
 
 proc `|=`*(b: var bool, x: bool) =
   b = b or x
 
-proc clearExtras(p: NimPackage): NimPackage =
+proc clearMetadata(p: NimPackage): NimPackage =
+  ## clears unneeded metadata for writing to packages/pkg.json
   result = p
-  result.status = Unknown
+  result.commitTime = 0
+  result.versionTime = 0
+  if result.status == Alias:
+    result.status = UpToDate # UpToDate won't be serialized
 
 proc toPrettyJson(p: NimPackage): string =
   ## roundtrip jsony serialization and std/json deserialization to get pretty string
   p.toJson().fromJson().pretty()
 
 proc dump*(p: NimPackage, dir: string) =
-  writeFile(dir / p.name & ".json", p.clearExtras().toPrettyJson())
+  writeFile(dir / p.name & ".json", p.clearMetadata().toPrettyJson())
 
 proc parseRemoteRefs(remoteStr: string): seq[Remote] =
   for line in remoteStr.strip().split("\n"):
@@ -299,6 +330,7 @@ proc remoteIsUnreachable(response: string): R[bool] =
   test response.strip().endsWith("not found")
   test ("Could not resolve host:" in response)
   test ("SSL certificate problem" in response)
+  test ("SSL certificate OpenSSL verify result" in response)
   test ("The requested URL returned error: 502" in response)
   test ("TLS connect error" in response)
 
@@ -343,7 +375,6 @@ proc cmpPkgs*(a:string, b: string): int =
 proc cmpPkgs*(a, b: Package): int =
   cmpPkgs(a.name, b.name)
 
-# TODO: bubble up an error?
 proc getOfficialPackages*(): R[(Remote,seq[Package])] =
   let repo = GitRepo(url: "https://github.com/nim-lang/packages")
   let
@@ -366,40 +397,38 @@ proc toNimPackage(p: Package): NimPackage =
   ## generate a NimPackage anew
   result <- p
 
+proc `[]`(np: NimPkgs, p: Package): NimPackage =
+  np.packages[p.name]
 proc `[]`(np: var NimPkgs, p: Package): var NimPackage =
   np.packages[p.name]
 
-proc `<-`(np: var NimPkgs, p: Package) =
-  # new package!
-  if p notin np:
-    np.add p.toNimPackage
-  # a new url means means we start over commits/tags
-  elif np[p].url != p.url:
-    np.add p.toNimPackage
+# result?
+proc loadFromExisting(ctx: CrawlerContext, pkg: var NimPackage): R[void] =
+  let path = ctx.path(pkg)
+  if fileExists(path):
+    attempt(fmt"failed to load existing metadata for package: {pkg.name}"):
+      let existing = fromJson(readFile(path), NimPackage)
+      pkg.status = existing.status
+      pkg.commit = existing.commit
+      pkg.license = existing.license
+      pkg.method = existing.method
+      pkg.versions = existing.versions
+
+  ok()
 
 proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
   np.packages[name]
 
-proc loadExisting(ctx: CrawlerContext, pkg: var NimPackage) =
-  let path = ctx.path(pkg)
-  if fileExists(path):
-    let existing = fromJson(readFile(path), NimPackage)
-    pkg.method = existing.method
-    pkg.versions = existing.versions
 
 proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
-  var nimpkgs = ?initNimPkgs(ctx.paths.nimpkgs)
+  let old = ?initNimPkgs(ctx.paths.nimpkgs)
+  var nimpkgs = NimPkgs()
   let (rev, officialPackages) = ?getOfficialPackages()
-
   nimpkgs.packagesHash = rev.hash
 
   for p in officialPackages:
-    if p.name in ctx.force:
-      nimpkgs.add p.toNimPackage
-    else:
-      nimpkgs <- p
-
-    loadExisting ctx, nimpkgs[p]
+    nimpkgs.add p.toNimPackage
+    ?loadFromExisting(ctx, nimpkgs[p])
 
   ok nimpkgs
 
@@ -428,7 +457,7 @@ proc setRecent*(nimpkgs: var  NimPkgs): R[void] =
 
 proc getOutOfDatePackages*(nimpkgs: NimPkgs): seq[string] =
   for name, pkg in nimpkgs.packages.pairs():
-    if pkg.status in Unknown..OutOfDate:
+    if pkg.status in {Unknown, OutOfDate}:
       result.add name
 
 proc getValidPackages*(nimpkgs: NimPkgs): seq[string] =
