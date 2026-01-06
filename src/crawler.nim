@@ -152,7 +152,7 @@ hwylCli:
     createDir ctx.paths.packages
     createDir "repos"
 
-    let (rev, officialPackages) = getOfficialPackages().bail()
+    let (rev, officialPackages) = getOfficialPackages().bail("failed to get official packages.json")
     var nimpkgs = newNimPkgs(ctx, officialPackages).bail()
 
     update ctx, nimpkgs

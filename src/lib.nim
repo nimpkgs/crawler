@@ -1,6 +1,6 @@
 import std/[strutils]
-import hwylterm, resultz
-export resultz
+import hwylterm, resultz, jsony
+export resultz, jsony
 
 setHwylConsoleFile(stderr)
 
@@ -36,6 +36,10 @@ template attempt*(msg: string, body: untyped) =
     body
   except:
     return err(msg.appendError(getCurrentExceptionMsg()))
+
+proc fromJsonResult*[T](s: string, x: typedesc[T]): R[T] =
+  attempt"json parsing error":
+    return ok(fromJson("-" & s, x))
 
 proc prependError*[T, E](self: Result[T,E], s: string): Result[T, E] {.inline.} =
   self.mapErr(proc(e: string): string = s.appendError(e))

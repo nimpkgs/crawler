@@ -59,6 +59,7 @@ type
     status*: NimPackageStatus
     commitTime*: int
     versionTime*: int
+    meta*: RawJson
 
   NimPkgs* = OrderedTable[string, NimPackage]
 
@@ -126,6 +127,8 @@ proc isNull(v: NimPackageStatus): bool =
   v == UpToDate # error check this instead?
 proc isNull(v: Commit): bool = v.hash == "" and v.time == 0
 proc isNull(v: int): bool = v == 0
+proc isNull(v: RawJson): bool = v.string == ""
+
 proc dumpHook*(s: var string, v: Time) = s.add $v.toUnix()
 
 proc parseHook*(s: string, i: var int, v: var Time) =
@@ -349,6 +352,8 @@ proc compare(np: var NimPackage, remote: Remote): bool =
   return true
 
 proc checkRemotes*(np: var NimPackage): R[bool] =
+  ## if true package has new remotes
+
   if np.status in Alias..Deleted:
     return ok false # nothing to check for these so noop...
   let (lsRemoteOutput, code) = np.repo.lsRemote()
@@ -361,10 +366,12 @@ proc checkRemotes*(np: var NimPackage): R[bool] =
 const nimlangPackageUrl =
   "https://raw.githubusercontent.com/nim-lang/packages/master/packages.json"
 
-proc fetchPackageJson(): string =
+proc fetchPackageJson(): R[string] =
   var client = newHttpClient()
   try:
-    result = client.get(nimLangPackageUrl).body()
+    return ok(client.get(nimLangPackageUrl).body())
+  except:
+    return err("failed to fetch official packages.json")
   finally:
     close client
 
@@ -381,7 +388,7 @@ proc getOfficialPackages*(): R[(Remote,seq[Package])] =
   if code != 0:
     return err "failed to get nim-lang/packages revision".appendError(remoteResponse)
   let packagesRev = ?recentRemote(remoteResponse).prependError("couldn't get remote ref for official packages")
-  var packages = fetchPackageJson().fromJson(seq[Package])
+  var packages = ?fromJsonResult(?fetchPackageJson(), seq[Package])
   packages.sort(cmpPkgs)
   return ok((packagesRev, packages))
 
