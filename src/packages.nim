@@ -49,6 +49,7 @@ type
     Unreachable,
     Deleted
 
+  # NOTE: should I just be using optionals instead of these complex isNull things?
   NimPackage* = object
     name*, url*, `method`*, description*,
       license*, web*, doc*, alias*: string
@@ -59,20 +60,16 @@ type
     commitTime*: int
     versionTime*: int
 
-  NimPkgs* = object
-    updated*: Time
-    recent*: seq[string]
-    packagesHash*: string
-    packages*: OrderedTable[string, NimPackage]
+  NimPkgs* = OrderedTable[string, NimPackage]
 
 func path(ctx: CrawlerContext, p: NimPackage): string =
   ctx.paths.packages / p.name & ".json"
 
-func contains(nimpkgs: var NimPkgs, p: Package): bool =
-  p.name in nimpkgs.packages
+func contains(nimpkgs: NimPkgs, p: Package): bool =
+  p.name in nimpkgs
 
 func add*(nimpkgs: var NimPkgs, p: NimPackage) =
-  nimpkgs.packages[p.name] = p
+  nimpkgs[p.name] = p
 
 func noCommitData(np: NimPackage): bool =
   np.commit.time == 0
@@ -388,19 +385,10 @@ proc getOfficialPackages*(): R[(Remote,seq[Package])] =
   packages.sort(cmpPkgs)
   return ok((packagesRev, packages))
 
-# built from scratch each time now...
-# proc initNimPkgs(path: string): R[NimPkgs] =
-#   if fileExists path:
-#     attempt("failed to load existing nimpkgs, see below"):
-#       return ok readFile(path).fromJson(NimPkgs)
-#
-#   ok NimPkgs()
-
 proc toNimPackage(p: Package): NimPackage =
   ## generate a NimPackage anew
   result <- p
 
-# result?
 proc loadFromExisting(ctx: CrawlerContext, pkg: var NimPackage): R[void] =
   let path = ctx.path(pkg)
   if fileExists(path):
@@ -414,19 +402,12 @@ proc loadFromExisting(ctx: CrawlerContext, pkg: var NimPackage): R[void] =
 
   ok()
 
-proc `[]`*(np: var NimPkgs, name: string): var NimPackage =
-  np.packages[name]
-
-proc newNimPkgs*(ctx: CrawlerContext): R[Nimpkgs] =
+proc newNimPkgs*(ctx: CrawlerContext, officialPackages: seq[Package]): R[NimPkgs] =
   var nimpkgs = NimPkgs()
-  let (rev, officialPackages) = ?getOfficialPackages()
-  nimpkgs.packagesHash = rev.hash
-
   for p in officialPackages:
     var pkg = p.toNimPackage
     ?loadFromExisting(ctx, pkg)
     nimpkgs.add pkg
-
   ok nimpkgs
 
 func packageFilesFromGitOutput(output: string): seq[string] =
@@ -448,21 +429,20 @@ proc recentPackages(existing: seq[string]): R[seq[string]] =
   paths.reverse()
   ok paths
 
-proc setRecent*(nimpkgs: var  NimPkgs): R[void] =
-  nimpkgs.recent = ?recentPackages(nimpkgs.packages.keys.toSeq())
-  ok()
+proc getRecent*(nimpkgs: NimPkgs): R[seq[string]] =
+  recentPackages(nimpkgs.keys.toSeq())
 
 proc getOutOfDatePackages*(nimpkgs: NimPkgs): seq[string] =
-  for name, pkg in nimpkgs.packages.pairs():
+  for name, pkg in nimpkgs.pairs():
     if pkg.status in {Unknown, OutOfDate}:
       result.add name
 
 proc getValidPackages*(nimpkgs: NimPkgs): seq[string] =
-  for name, pkg in nimpkgs.packages.pairs():
+  for name, pkg in nimpkgs.pairs():
     if pkg.status notin {Unreachable, Alias, Deleted}:
       result.add name
 
 proc getUnreachablePackages*(nimpkgs: NimPkgs): seq[string] =
-  for name, pkg in nimpkgs.packages.pairs():
+  for name, pkg in nimpkgs.pairs():
     if pkg.status == Unreachable:
       result.add name

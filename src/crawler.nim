@@ -5,36 +5,34 @@ import std/[
 import jsony, hwylterm, hwylterm/hwylcli, resultz
 import ./[packages, lib]
 
-# TODO: refactor so this object is created at dump time...
-
 type
-  NimPkgsSimple* = object
+  Index* = object
     updated*: Time
     recent*: seq[string]
     packagesHash*: string
-    packages*: seq[NimPackage] # only this one needs to be a table?
+    packages*: seq[NimPackage]
 
-proc simplify(nimpkgs: NimPkgs): NimpkgsSimple =
+proc init(T: typedesc[Index], rev: Remote, recent: seq[string], packages: seq[NimPackage]): T =
   result.updated = getTime()
-  result.recent = nimpkgs.recent
-  result.packages = nimpkgs.packages.values().toSeq()
-  result.packagesHash = nimpkgs.packagesHash
+  result.recent = recent
+  result.packagesHash = rev.hash
+  result.packages = packages
 
-proc dump(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
-  nimpkgs.updated = getTime()
+proc dump(ctx: CrawlerContext, nimpkgs: NimPkgs, rev: Remote, recent: seq[string]) =
+  var packages = nimpkgs.values().toSeq()
 
   # before dumping the full index we drop some of the metadata
-  for _, package in nimpkgs.packages.mpairs:
+  for package in packages.mitems:
     package.setTimes()
     package.clearMetadataForIndex()
 
-  let simple = nimpkgs.simplify()
-  writeFile(ctx.paths.nimpkgs, simple.toJson())
+  let index = Index.init(rev, recent, packages)
+  writeFile(ctx.paths.nimpkgs, index.toJson())
 
 proc cleanup(ctx: CrawlerContext, nimpkgs: NimPkgs) =
   for (_, path) in walkDir(ctx.paths.packages):
     let name = path.splitFile.name
-    if name notin nimpkgs.packages:
+    if name notin nimpkgs:
       echo fmt"removing individual package data for: {name}"
       removeFile path
 
@@ -49,7 +47,7 @@ proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
     of "@unreachable":
       names.incl nimpkgs.getUnreachablePackages().toHashSet()
     else:
-      if n notin nimpkgs.packages:
+      if n notin nimpkgs:
         unknown.incl n
       else:
         names.incl n
@@ -97,8 +95,6 @@ proc update(ctx: var CrawlerContext, nimpkgs: var NimPkgs) =
     checkForTags(ctx, nimpkgs, outOfDatePkgs).bail("failure to get updated tags")
   else:
     hecho "no packages need to be checked for new tags"
-
-  setRecent(nimpkgs).bail("failure to set recent packages")
 
 proc checkPaths(ctx: CrawlerContext, bootstrap: bool) =
   if bootstrap: return
@@ -156,8 +152,11 @@ hwylCli:
     createDir ctx.paths.packages
     createDir "repos"
 
-    var nimpkgs = newNimPkgs(ctx).bail()
+    let (rev, officialPackages) = getOfficialPackages().bail()
+    var nimpkgs = newNimPkgs(ctx, officialPackages).bail()
+
     update ctx, nimpkgs
-    dump ctx, nimpkgs
+    let recent = getRecent(nimpkgs).bail("failed to get recent packages")
+    dump ctx, nimpkgs, rev, recent
     cleanup ctx, nimpkgs
 
