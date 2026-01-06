@@ -6,6 +6,7 @@ setHwylConsoleFile(stderr)
 
 type
   R*[T] = Result[T, string] # all errors used should be simple strings
+  E* = R[void]
 
   Paths* = tuple
     nimpkgs = "./nimpkgs.json"
@@ -39,7 +40,7 @@ template attempt*(msg: string, body: untyped) =
 
 proc fromJsonResult*[T](s: string, x: typedesc[T]): R[T] =
   attempt"json parsing error":
-    return ok(fromJson("-" & s, x))
+    return ok(fromJson(s, x))
 
 proc prependError*[T, E](self: Result[T,E], s: string): Result[T, E] {.inline.} =
   self.mapErr(proc(e: string): string = s.appendError(e))
