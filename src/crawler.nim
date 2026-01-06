@@ -6,41 +6,49 @@ import jsony, hwylterm, hwylterm/hwylcli, resultz
 import ./[packages, lib]
 
 type
+  RecentPackages = object
+    added: seq[string]
+    released: OrderedTable[string, string]
   Index* = object
     updated*: Time
-    recent*: seq[string]
+    recent: RecentPackages
     packagesHash*: string
     packages*: seq[NimPackage]
 
-proc init(T: typedesc[Index], rev: Remote, recent: seq[string], packages: seq[NimPackage]): T =
-  result.updated = getTime()
-  result.recent = recent
-  result.packagesHash = rev.hash
-  result.packages = packages
-
-proc dump(ctx: CrawlerContext, nimpkgs: NimPkgs, rev: Remote, recent: seq[string]) =
+proc init(T: typedesc[Index], nimpkgs: NimPkgs, packagesHash: string , added: seq[string]): T =
   var packages = nimpkgs.values().toSeq()
+  let released = getRecentlyReleased(nimpkgs)
 
   # before dumping the full index we drop some of the metadata
   for package in packages.mitems:
-    package.setTimes()
-    package.clearMetadataForIndex()
+    package.setMetadataForIndex()
 
-  let index = Index.init(rev, recent, packages)
-  writeFile(ctx.paths.nimpkgs, index.toJson())
+  result.updated = getTime()
+  result.recent = RecentPackages(added: added, released: released)
+  result.packagesHash = packagesHash
+  result.packages = packages
 
-proc cleanup(ctx: CrawlerContext, nimpkgs: NimPkgs) =
-  for (_, path) in walkDir(ctx.paths.packages):
-    let name = path.splitFile.name
-    if name notin nimpkgs:
-      echo fmt"removing individual package data for: {name}"
-      removeFile path
+proc dump(index: Index) =
+  writeFile(ctx.paths.index, index.toJson())
 
-proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
+proc cleanup(nimpkgs: NimPkgs): E =
+  for (kind, path) in walkDir(ctx.paths.packages):
+    if kind notin {pcDir, pcLinkToDir}:
+      return err fmt"unexpected file in packages directory: {path}"
+    for (kind, path) in walkDir(path):
+      let name = path.lastPathPart
+      if name notin nimpkgs:
+        info fmt"removing individual package data for: {name}"
+        attempt(fmt"error removing directory: {path}"):
+          removeDir path
+  ok()
+
+# BUG: if @unreachable is given to force the names no longer work, seperate the collect names from purge
+proc collectNames(spec: seq[string], nimpkgs: NimPkgs): R[seq[string]] =
   var names, unknown: HashSet[string]
-  if ctx.check.len == 0:
+  if spec.len == 0:
     return ok nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
-  for n in ctx.check:
+  for n in spec:
     case n
     of "@valid":
       names.incl nimpkgs.getValidPackages().toHashSet()
@@ -56,77 +64,84 @@ proc collectNames(ctx: CrawlerContext, nimpkgs: NimPkgs): R[seq[string]] =
 
   ok(names.toSeq().sorted(cmpPkgs))
 
-proc checkForCommits(ctx: var CrawlerContext, nimpkgs: var Nimpkgs, names: seq[string]): R[seq[string]] =
-  hecho bbfmt"checking for new commits on [b]{names.len}[/] packages"
+proc purge*(ctx: CrawlerContext, names: seq[string]): E =
+  ## remove the packages/pkg.json for any existing package given to "force"
+  if ctx.force.len == 0:
+    return ok()
+  for name in names:
+    let path = pkgPath(name)
+    if fileExists(path):
+      attempt(fmt"error removing file: {path}"):
+        removeFile(path)
+    else:
+      debug fmt"{path} does not exist...ignoring"
+  ok()
 
-  var toCheck: seq[string]
-  var p = newProgress(ctx)
-  for name in p.progress(names):
+proc updatePackages(ctx: CrawlerContext, nimpkgs: var Nimpkgs, names: seq[string]): E =
+  info bbfmt"checking for new commits/versions on [b]{names.len}[/] packages"
+
+  for i, name in names:
+    info nimpkgs[name], fmt"[{i+1}/{names.len}]"
     case nimpkgs[name].checkRemotes().mapPkgErr(name)
     of Ok(hasNewCommits):
       if hasNewCommits:
-        toCheck.add name
+        nimpkgs[name].updateVersions().mapPkgErr(name).isOkOr:
+          handleError ctx, error
     of Err(e):
       handleError ctx, e
-    dump nimpkgs[name], ctx.paths.packages
 
-  ok toCheck
-
-proc checkForTags(ctx: var CrawlerContext, nimpkgs: var NimPkgs, names: seq[string]): R[void] =
-  hecho bbfmt"checking for new tags in [b]{names.len}[/] packages"
-
-  var p = newProgress(ctx)
-  for name in p.progress(names):
-    nimpkgs[name]
-      .updateVersions()
-      .mapPkgErr(name)
-      .isOkOr:
-        handleError ctx, error
-
-    dump nimpkgs[name], ctx.paths.packages
+    dump nimpkgs[name]
 
   ok()
 
-proc update(ctx: var CrawlerContext, nimpkgs: var NimPkgs) =
-  let names = collectNames(ctx, nimpkgs).bail()
-  let outOfDatePkgs = checkForCommits(ctx, nimpkgs, names).bail("failure to check for new commits")
+proc update(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
+  let names = collectNames(ctx.check, nimpkgs).bail()
+  updatePackages(ctx, nimpkgs, names).bail("failure to check for new commits")
 
-  if outOfDatePkgs.len > 0:
-    checkForTags(ctx, nimpkgs, outOfDatePkgs).bail("failure to get updated tags")
-  else:
-    hecho "no packages need to be checked for new tags"
-
-proc checkPaths(ctx: CrawlerContext, bootstrap: bool) =
-  if bootstrap: return
-
+proc checkPaths() =
   var toBail = false
 
-  toBail |= not ctx.paths.nimpkgs.fileExists
+  toBail |= not ctx.paths.index.fileExists
   toBail |= not ctx.paths.packages.dirExists
 
   if toBail:
     errQuit bb"expected existing [b]nimpkgs[/] registry, " &
-      bb"run with [b]--bootstrap[/] to create needed files/directories"
+      bb"run with [b]--mode Bootstrap[/] to create needed files/directories"
+
+proc loadIndex(): R[Index] =
+  if not fileExists(ctx.paths.index):
+    return err "index does not exist " &
+      $bb"run with [b]--mode Bootstrap[/] to create needed files/directories"
+  attempt"failed to load previous index":
+    return ok(readFile(ctx.paths.index).fromJson(Index))
 
 
-let ctxDefault = CrawlerContext()
+type
+  CrawlerMode = enum
+    Update ## fetch + recent (recent is implied)
+    Fetch  ## uses existing packages.json hash, but updates package versions
+    Recent ## force update recent using the current hash
+    Bootstrap ## initiate then update
 
+# TODO: add a verbosity flag
 hwylCli:
   name "crawler"
   settings LongHelp, InferEnv
   flags:
-    nimpkgs:
+    index:
       i nimpkgsPath
       T string
       ? "path to nimpkgs.json"
-      * ctxDefault.paths.nimpkgs
+      * ctx.paths.index
     packages:
       i packagesPath
       T string
       ? "path to packages dir"
-      * ctxDefault.paths.packages
-    bootstrap:
-      ? "generate a new nimpkgs registry"
+      * ctx.paths.packages
+    mode:
+      ? "crawler mode"
+      T CrawlerMode
+      * Update
     force:
       ? "packages to force update"
       - f
@@ -140,23 +155,56 @@ hwylCli:
       - c
 
   run:
+    ctx.paths.index = nimpkgsPath
+    ctx.paths.packages = packagesPath
+    ctx.force = force
+    ctx.check = if check.len == 0 and force.len != 0: force else: check
+    ctx.ignoreError = ignoreError
 
-    var ctx = CrawlerContext(
-      paths: (nimpkgsPath, packagesPath),
-      force: force,
-      check: if check.len == 0 and force.len != 0: force else: check,
-      ignoreError: ignoreError
-    )
+    if mode != Bootstrap:
+      checkPaths()
 
-    checkPaths ctx, bootstrap
     createDir ctx.paths.packages
     createDir "repos"
 
-    let (rev, officialPackages) = getOfficialPackages().bail("failed to get official packages.json")
-    var nimpkgs = newNimPkgs(ctx, officialPackages).bail()
+    var prevHash: string
+    var added: seq[string]
+    if mode != Bootstrap:
+      let prev = loadIndex().bail("error loading previous index")
+      prevHash = prev.packagesHash
+      added = prev.recent.added
+    else:
+      info "Running in [yellow]BOOTSTRAP[/] mode".bb
 
-    update ctx, nimpkgs
-    let recent = getRecent(nimpkgs).bail("failed to get recent packages")
-    dump ctx, nimpkgs, rev, recent
-    cleanup ctx, nimpkgs
+    let officialHash =
+      if mode in {Recent,Fetch}: prevHash
+      else:
+        debug "fetching new official packages commit info"
+        getOfficialHead().bail("failed to fetch official package info").hash
+
+    if prevHash != officialHash:
+      info "packages.json has changed since the last crawl"
+
+    let officialPackages = getOfficialPackages(officialHash).bail("failed to get official packages.json")
+    var nimpkgs = newNimPkgs(ctx, officialPackages).bail("failed to initiate nimpkgs index")
+
+    if mode in {Update, Fetch, Bootstrap}:
+      if ctx.force.len > 0:
+        let names = collectNames(ctx.force, nimpkgs).bail("failed to handle args for force: " & force.join(", "))
+        ctx.check = if check.len == 0 and force.len != 0: names else: check
+        purge(ctx, names).bail("pre-run cleanup failed")
+        debug "reloading nimpkgs following purge"
+        nimpkgs = newNimPkgs(ctx, officialPackages).bail("failed to initiate new nimpkgs")
+
+      update ctx, nimpkgs
+
+    if mode != Bootstrap and prevHash == officialHash:
+      info "packages hash is the same, skipping recent check"
+    else:
+      added = getRecentlyAdded(officialHash, officialPackages).bail("failed to get recent packages")
+
+    Index.init(nimpkgs, officialHash, added).dump()
+    (cleanup nimpkgs).bail("post-run cleanup failed")
+
+
 

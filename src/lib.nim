@@ -1,6 +1,7 @@
 import std/[strutils]
 import hwylterm, resultz, jsony
-export resultz, jsony
+import hwylterm/logging
+export resultz, jsony, logging, hwylterm
 
 setHwylConsoleFile(stderr)
 
@@ -9,7 +10,7 @@ type
   E* = R[void]
 
   Paths* = tuple
-    nimpkgs = "./nimpkgs.json"
+    index = "./nimpkgs.json"
     packages = "./packages"
 
   CrawlerContext* = object
@@ -18,6 +19,8 @@ type
     paths*: Paths
     force*, check*: seq[string]
     ignoreError*: bool
+
+var ctx* = CrawlerContext()
 
 iterator splitLinesFinal(s: string): tuple[line: string, final: bool] =
   let lines = s.strip().splitLines(keepEol = true)
@@ -48,15 +51,15 @@ proc prependError*[T, E](self: Result[T,E], s: string): Result[T, E] {.inline.} 
 proc showError(args: varargs[string, `$`]) =
   writeLine stderr, $bb"[b red]ERROR[/]: ", args.join("")
 
-proc showError(spinner: Spinny, args: varargs[string, `$`]) =
-  spinner.echo bb"[b red]ERROR[/]: " & args.join("")
+# proc showError(spinner: Spinny, args: varargs[string, `$`]) =
+#   spinner.echo bb"[b red]ERROR[/]: " & args.join("")
 
-proc showError(ctx: CrawlerContext, args: varargs[string, `$`]) =
-  if ctx.spinner.running:
-    showError(ctx.spinner, args)
-  else:
-    showError(args)
-
+# proc showError(ctx: CrawlerContext, args: varargs[string, `$`]) =
+#   if ctx.spinner.running:
+#     showError(ctx.spinner, args)
+#   else:
+#     showError(args)
+#
 proc errQuitWithCode*(code: int, args: varargs[string, `$`]) =
   quit $bb"[b red]ERROR[/]: " & args.join(""), code
 
@@ -80,8 +83,12 @@ proc newProgress*(ctx: var CrawlerContext): Progress =
 
 template handleError*(ctx: CrawlerContext, e: string) =
   if ctx.ignoreError:
-    showError(ctx, e)
+    #showError(ctx, e)
+    error e
   else:
     result = err(e)
     return
+
+addHandler newHwylConsoleLogger(levelThreshold=lvlAll)
+
 
