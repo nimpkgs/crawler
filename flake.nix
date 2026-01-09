@@ -40,13 +40,27 @@
         };
       });
       packages = forAllSystems (pkgs: {
-        default = pkgs.buildNimblePackage {
-          pname = "crawler";
-          version = "unstable";
-          src = ./.;
-          buildInputs = [ pkgs.openssl ];
-          nimbleDepsHash = "sha256-XLLaeTdJlWPQneE79IOTNdMXYkfI+MvBhNBqExDzd0M=";
-        };
+        default = pkgs.callPackage (
+          {
+            lib,
+            makeWrapper,
+            openssl,
+            nimble,
+            buildNimblePackage,
+          }:
+          buildNimblePackage {
+            pname = "crawler";
+            version = "unstable";
+            src = ./.;
+            buildInputs = [ openssl ];
+            nativeBuildInputs = [ makeWrapper ];
+            nimbleDepsHash = "sha256-XLLaeTdJlWPQneE79IOTNdMXYkfI+MvBhNBqExDzd0M=";
+            postInstall = ''
+              wrapProgram $out/bin/crawler \
+                --prefix PATH : ${lib.makeBinPath [ nimble ]}
+            '';
+          }
+        ) { };
       });
       formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
     };
