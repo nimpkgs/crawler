@@ -123,6 +123,8 @@ type
     Recent ## force update recent using the current hash
     Bootstrap ## initiate then update
 
+const crawlerModeHelp = "crawler mode" & "\n\nchoices: " & enumNames(CrawlerMode).join(",")
+
 # TODO: add a verbosity flag
 hwylCli:
   name "crawler"
@@ -139,7 +141,7 @@ hwylCli:
       ? "path to packages dir"
       * ctx.paths.packages
     mode:
-      ? "crawler mode"
+      ? crawlerModeHelp
       T CrawlerMode
       * Update
     force:
