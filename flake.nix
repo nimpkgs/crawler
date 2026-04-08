@@ -54,7 +54,7 @@
             src = ./.;
             buildInputs = [ openssl ];
             nativeBuildInputs = [ makeWrapper ];
-            nimbleDepsHash = "sha256-XLLaeTdJlWPQneE79IOTNdMXYkfI+MvBhNBqExDzd0M=";
+            nimbleDepsHash = "sha256-+1mKr5HjN8Np2GBiifodW2CFgRfo3K13hYPcP75kGeY=";
             postInstall = ''
               wrapProgram $out/bin/crawler \
                 --prefix PATH : ${lib.makeBinPath [ nimble ]}

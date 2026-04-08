@@ -2,23 +2,23 @@
   "version": 2,
   "packages": {
     "hwylterm": {
-      "version": "0.1.0",
-      "vcsRevision": "ed16f79a23fde1ee2060a7e7b2ec120727fce5ba",
+      "version": "0.3.0",
+      "vcsRevision": "126e2563134b27316b96acabc2c140ff6aeb97a4",
       "url": "https://github.com/daylinmorgan/hwylterm",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "c85a14890f2e211e440ca54ed9d25396ab0aa605"
+        "sha1": "d7279a62942cbc6e390d65be3f3a835406971636"
       }
     },
     "jsony": {
-      "version": "1.1.5",
-      "vcsRevision": "ea811bec7fa50f5abd3088ba94cda74285e93f18",
+      "version": "1.1.6",
+      "vcsRevision": "bb647e1ca21af25ffdc423bcb96feeeeae963ca2",
       "url": "https://github.com/treeform/jsony",
       "downloadMethod": "git",
       "dependencies": [],
       "checksums": {
-        "sha1": "6aeb83e7481ca8686396a568096054bc668294df"
+        "sha1": "b28964a93a3cf7248126ba39047593cd63a3aa6d"
       }
     },
     "resultz": {
