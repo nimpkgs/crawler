@@ -1,7 +1,7 @@
-import std/[strutils]
-import hwylterm, resultz, jsony
+import std/strutils
+import hwylterm, jsony, resultz
 import hwylterm/logging
-export resultz, jsony, logging, hwylterm
+export hwylterm, jsony, logging, resultz
 
 setHwylConsoleFile(stderr)
 

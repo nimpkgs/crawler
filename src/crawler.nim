@@ -1,8 +1,6 @@
-import std/[
-    algorithm, os, sequtils, strformat, strutils,
-    sets, tables, times,
-]
-import jsony, hwylterm, hwylterm/hwylcli, resultz
+import std/[algorithm, os, sequtils, sets, strformat, strutils, tables, times]
+import hwylterm, jsony, resultz
+import hwylterm/hwylcli
 import ./[packages, lib]
 
 type

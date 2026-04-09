@@ -1,14 +1,11 @@
 import std/[
-    algorithm, httpclient, options,
-    os, osproc, sequtils,
-    sets, strformat, strtabs,
-    strutils, tables, times,
-    uri, tempfiles, sugar
+  algorithm, httpclient, options, os, osproc, sequtils, sets, strformat,
+  strtabs, strutils, sugar, tables, tempfiles, times, uri
 ]
-from std/json import pretty
 import jsony, resultz
-export resultz
+from std/json import pretty
 import ./lib
+export resultz
 
 proc defaultEnv(): StringTableRef =
   result = newStringTable(mode = modeCaseSensitive)
