@@ -49,11 +49,17 @@ proc collectNames(spec: seq[string], nimpkgs: NimPkgs): R[seq[string]] =
   if spec.len == 0:
     return ok nimpkgs.getOutOfDatePackages().sorted(cmpPkgs)
   for n in spec:
-    case n
-    of "@valid":
-      names.incl nimpkgs.getValidPackages().toHashSet()
-    of "@unreachable":
-      names.incl nimpkgs.getUnreachablePackages().toHashSet()
+    const selectors = ["@valid", "@unreachable", "@unknown"] # TODO: use enum instead?
+    if n.startsWith("@"):
+      case n[1..^1]:
+      of "valid":
+        names.incl nimpkgs.getValidPackages().toHashSet()
+      of "unreachable":
+        names.incl nimpkgs.getUnreachablePackages().toHashSet()
+      of "unknown":
+        names.incl nimpkgs.getUnknownPackages().toHashSet()
+      else:
+        return err "unknown special selector: $# must be one of: $#" % [n, selectors.join(", ")]
     else:
       if n notin nimpkgs:
         unknown.incl n

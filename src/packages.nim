@@ -569,3 +569,8 @@ proc getUnreachablePackages*(nimpkgs: NimPkgs): seq[string] =
   for name, pkg in nimpkgs.pairs():
     if pkg.meta.status == Unreachable:
       result.add name
+
+proc getUnknownPackages*(nimpkgs: NimPkgs): seq[string] =
+  for name, pkg in nimpkgs.pairs():
+    if pkg.meta.status == Unknown:
+      result.add name
