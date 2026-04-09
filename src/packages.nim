@@ -458,6 +458,7 @@ proc checkRemotes*(pkg: var NimPackage): R[bool] =
   if code != 0:
     pkg.meta.status = Unreachable
     return remoteIsUnreachable(lsRemoteOutput)
+  pkg.meta.status = Valid
   let remote = ?recentRemote(lsRemoteOutput)
   result = ok compare(pkg, remote)
 
