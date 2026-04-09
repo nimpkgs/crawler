@@ -197,9 +197,11 @@ hwylCli:
     var nimpkgs = newNimPkgs(ctx, officialPackages).bail("failed to initiate nimpkgs index")
 
     if mode in {Update, Fetch, Bootstrap}:
+      if mode == Bootstrap:
+        ctx.force.add officialPackages.mapIt(it.name)
       if ctx.force.len > 0:
         let names = collectNames(ctx.force, nimpkgs).bail("failed to handle args for force: " & force.join(", "))
-        ctx.check = if check.len == 0 and force.len != 0: names else: check
+        ctx.check.add names
         purge(ctx, names).bail("pre-run cleanup failed")
         debug "reloading nimpkgs following purge"
         nimpkgs = newNimPkgs(ctx, officialPackages).bail("failed to initiate new nimpkgs")
