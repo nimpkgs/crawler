@@ -1,5 +1,6 @@
 import std/[algorithm, os, sequtils, sets, strformat, strutils, tables, times]
-import hwylterm, jsony, resultz
+import chronos, hwylterm, jsony
+import chronos/asyncsync
 import hwylterm/hwylcli
 import ./[packages, lib]
 
@@ -81,26 +82,83 @@ proc purge*(ctx: CrawlerContext, names: seq[string]): E =
       debug fmt"{path} does not exist...ignoring"
   ok()
 
-proc updatePackages(ctx: CrawlerContext, nimpkgs: var Nimpkgs, names: seq[string]): E =
-  info bbfmt"checking for new commits/versions on [b]{names.len}[/] packages"
+proc checkPackage(
+  sem: AsyncSemaphore,
+  pkg: NimPackage,
+  ctx: CrawlerContext,
+  idx, total: int
+): Future[CheckResult] {.async.} =
+  await sem.acquire()
+  defer: sem.release()
+  info pkg, fmt"[{idx}/{total}] checking"
+  let res = (await checkRemotes(pkg)).mapPkgErr(pkg.name)
+  if res.isErr:
+    error res.error()
+    return CheckResult(hasNewCommits: false, pkg: pkg)
+  let r = res.get()
+  if r.err != "":
+    error r.err
+  return r
 
+proc updatePackage(
+  sem: AsyncSemaphore,
+  pkg: NimPackage,
+  ctx: CrawlerContext,
+  idx, total: int
+): Future[NimPackage] {.async.} =
+  await sem.acquire()
+  defer: sem.release()
+  info pkg, fmt"[{idx}/{total}] updating"
+  let res = (await updateVersions(pkg)).mapPkgErr(pkg.name)
+  if res.isOk:
+    return res.get()
+  error res.error()
+  return pkg
+
+proc updatePackages(
+  ctx: CrawlerContext,
+  nimpkgs: NimPkgs,
+  names: seq[string]
+): Future[NimPkgs] {.async.} =
+
+  # Phase 1: check all remotes concurrently
+  info bbfmt"checking remotes for [b]{names.len}[/] packages"
+  let checkSem = newAsyncSemaphore(ctx.jobs.remote)
+  var checkFutures: seq[Future[CheckResult]]
   for i, name in names:
-    info nimpkgs[name], fmt"[{i+1}/{names.len}]"
-    case nimpkgs[name].checkRemotes().mapPkgErr(name)
-    of Ok(hasNewCommits):
-      if hasNewCommits:
-        nimpkgs[name].updateVersions().mapPkgErr(name).isOkOr:
-          handleError ctx, error
-    of Err(e):
-      handleError ctx, e
+    checkFutures.add checkPackage(checkSem, nimpkgs[name], ctx, i + 1, names.len)
+  await allFutures(checkFutures)
 
-    dump nimpkgs[name]
+  # Collect results; find packages with new commits
+  var pkgs = nimpkgs
+  var toUpdate: seq[string]
+  for i, name in names:
+    let r = checkFutures[i].read()
+    pkgs[name] = r.pkg
+    if r.hasNewCommits:
+      toUpdate.add name
 
-  ok()
+  # Phase 2: clone/fetch/nimble dump only the packages that changed
+  if toUpdate.len > 0:
+    info bbfmt"updating [b]{toUpdate.len}[/] packages with new commits"
+    let updateSem = newAsyncSemaphore(ctx.jobs.fetch)
+    var updateFutures: seq[Future[NimPackage]]
+    for i, name in toUpdate:
+      updateFutures.add updatePackage(updateSem, pkgs[name], ctx, i + 1, toUpdate.len)
+    await allFutures(updateFutures)
+    for i, name in toUpdate:
+      pkgs[name] = updateFutures[i].read()
+
+  {.cast(gcsafe).}:
+    # Dump all processed packages
+    for name in names:
+      dump pkgs[name]
+
+  return pkgs
 
 proc update(ctx: CrawlerContext, nimpkgs: var NimPkgs) =
   let names = collectNames(ctx.check, nimpkgs).bail()
-  updatePackages(ctx, nimpkgs, names).bail("failure to check for new commits")
+  nimpkgs = waitFor updatePackages(ctx, nimpkgs, names)
 
 proc checkPaths() =
   var toBail = false
@@ -129,21 +187,14 @@ type
 
 const crawlerModeHelp = "crawler mode" & "\n\nchoices: " & enumNames(CrawlerMode).join(",")
 
-# TODO: add a verbosity flag
 hwylCli:
   name "crawler"
   settings LongHelp, InferEnv
   flags:
-    index:
-      i nimpkgsPath
-      T string
-      ? "path to nimpkgs.json"
-      * ctx.paths.index
-    packages:
-      i packagesPath
-      T string
-      ? "path to packages dir"
-      * ctx.paths.packages
+    paths:
+      T Paths
+      ? "paths for nimpkgs registry"
+      * default(Paths)
     mode:
       ? crawlerModeHelp
       T CrawlerMode
@@ -155,17 +206,21 @@ hwylCli:
     check:
       ? "packages to check remote refs"
       T seq[string]
-    `continue`:
-      ? "ignore errors"
-      i ignoreError
-      - c
+    j|jobs:
+      ? """
+      max concurrent jobs
 
+      total jobs used for each phase
+        remote: first phase (git ls-remote)
+        fetch: second phase (git clone, nimble dump)
+      """
+      T Jobs
+      * default(Jobs)
   run:
-    ctx.paths.index = nimpkgsPath
-    ctx.paths.packages = packagesPath
+    ctx.paths = paths
     ctx.force = force
     ctx.check = if check.len == 0 and force.len != 0: force else: check
-    ctx.ignoreError = ignoreError
+    ctx.jobs = jobs
 
     if mode != Bootstrap:
       checkPaths()
@@ -186,7 +241,7 @@ hwylCli:
       if mode in {Recent,Fetch}: prevHash
       else:
         debug "fetching new official packages commit info"
-        getOfficialHead().bail("failed to fetch official package info").hash
+        (waitFor getOfficialHead()).bail("failed to fetch official package info").hash
 
     if prevHash != officialHash:
       info "packages.json has changed since the last crawl"
@@ -209,7 +264,7 @@ hwylCli:
     if mode != Bootstrap and prevHash == officialHash:
       info "packages hash is the same, skipping recent check"
     else:
-      added = getRecentlyAdded(officialHash, officialPackages).bail("failed to get recent packages")
+      added = (waitFor getRecentlyAdded(officialHash, officialPackages)).bail("failed to get recent packages")
 
     Index.init(nimpkgs, officialHash, added).dump()
     (cleanup nimpkgs).bail("post-run cleanup failed")

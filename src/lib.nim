@@ -1,7 +1,7 @@
 import std/strutils
-import hwylterm, jsony, resultz
+import hwylterm, jsony, results
 import hwylterm/logging
-export hwylterm, jsony, logging, resultz
+export hwylterm, jsony, logging, results
 
 setHwylConsoleFile(stderr)
 
@@ -9,16 +9,18 @@ type
   R*[T] = Result[T, string] # all errors used should be simple strings
   E* = R[void]
 
-  Paths* = tuple
-    index = "./nimpkgs.json"
-    packages = "./packages"
+  Paths* = object
+    index* = "./nimpkgs.json"
+    packages* = "./packages"
+
+  Jobs* = object
+    remote*: int = 50
+    fetch*: int = 10
 
   CrawlerContext* = object
-    # nimpkgs: NimPkgs
-    spinner*: Spinny
     paths*: Paths
     force*, check*: seq[string]
-    ignoreError*: bool
+    jobs*: Jobs
 
 var ctx* = CrawlerContext()
 
@@ -51,15 +53,6 @@ proc prependError*[T, E](self: Result[T,E], s: string): Result[T, E] {.inline.} 
 proc showError(args: varargs[string, `$`]) =
   writeLine stderr, $bb"[b red]ERROR[/]: ", args.join("")
 
-# proc showError(spinner: Spinny, args: varargs[string, `$`]) =
-#   spinner.echo bb"[b red]ERROR[/]: " & args.join("")
-
-# proc showError(ctx: CrawlerContext, args: varargs[string, `$`]) =
-#   if ctx.spinner.running:
-#     showError(ctx.spinner, args)
-#   else:
-#     showError(args)
-#
 proc errQuitWithCode*(code: int, args: varargs[string, `$`]) =
   quit $bb"[b red]ERROR[/]: " & args.join(""), code
 
@@ -76,10 +69,6 @@ proc bail*[T,E](r: Result[T, E], msg: string = ""): T =
     let errVal = r.unsafeError
     let prefix = ($bb"[b]UNEXPECTED crawler exit[/]") & (if msg == "": "" else: ", " & msg)
     errQuit prefix.appendError(errVal)
-
-proc newProgress*(ctx: var CrawlerContext): Progress =
-  ctx.spinner = newSpinny()
-  result = newProgress(segments = @[Bar, Fraction])
 
 template handleError*(ctx: CrawlerContext, e: string) =
   if ctx.ignoreError:

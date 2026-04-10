@@ -1,11 +1,12 @@
 import std/[
-  algorithm, httpclient, options, os, osproc, sequtils, sets, strformat,
+  algorithm, httpclient, options, os, sequtils, sets, strformat,
   strtabs, strutils, sugar, tables, tempfiles, times, uri
 ]
-import jsony, resultz
+import chronos, jsony
+import chronos/[asyncproc, asyncsync]
+import stew/byteutils
 from std/json import pretty
 import ./lib
-export resultz
 
 proc defaultEnv(): StringTableRef =
   result = newStringTable(mode = modeCaseSensitive)
@@ -77,6 +78,11 @@ type
     meta*: NimPackageMeta
 
   NimPkgs* = OrderedTable[string, NimPackage]
+
+  CheckResult* = object
+    hasNewCommits*: bool
+    pkg*: NimPackage
+    err*: string  ## non-empty when lsRemote failed with an unrecognized pattern
 
 proc info*(pkg: NimPackage, args: varargs[string, `$`]) =
   info pkg.name.bb("bold"), " | ", args.join(" ")
@@ -235,22 +241,40 @@ proc nimbleWorkingDir(pkg: NimPackage): R[string] =
   else:
     ok repo.path
 
-proc cmdResult(cmd: string, workingDir = ""): R[string] =
+proc runCmd(cmd: string, workingDir = "",
+            env: StringTableRef = nil): Future[CommandExResponse] {.async.} =
+  ## Run a command, merging stderr into stdout (matches execCmdEx behavior).
+  let p = await startProcess(cmd, workingDir = workingDir, environment = env,
+    options = {AsyncProcessOption.EvalCommand, AsyncProcessOption.StdErrToStdOut},
+    stdoutHandle = AsyncProcess.Pipe)
+  let outR = p.stdoutStream.read()
+  try:
+    let status = await p.waitForExit(InfiniteDuration)
+    result = CommandExResponse(
+      status: status,
+      stdOutput: string.fromBytes(await outR),
+      stdError: "")
+  finally:
+    await p.closeWait()
+
+proc cmdResult(cmd: string, workingDir = ""): Future[R[string]] {.async.} =
   debug bbfmt"[faint]cmd: {cmd}"
-  let (output, code) = execCmdEx(cmd, workingDir = workingDir)
-  if code != 0:
-    return err fmt"cmd: `{cmd}` failed with exit code {code}".appendError(output)
-  ok output
+  let resp = await runCmd(cmd, workingDir = workingDir)
+  if resp.status != 0:
+    return err fmt"cmd: `{cmd}` failed with exit code {resp.status}".appendError(resp.stdOutput)
+  ok resp.stdOutput
 
-proc git(cmd: string): tuple[output: string, exitCode: int] =
+proc git(cmd: string): Future[CommandExResponse] {.async.} =
   debug bbfmt"[faint]cmd: git {cmd}"
-  result = execCmdEx(fmt"git {cmd}", env = gitEnv)
+  var env: StringTableRef
+  {.cast(gcsafe).}: env = gitEnv
+  return await runCmd(fmt"git {cmd}", env = env)
 
-proc gitResult(cmd: string): R[string] =
-  let (output, code) = git(cmd)
-  if code != 0:
-    return err fmt"cmd: `git {cmd}` failed with exit code {code}".appendError(output)
-  ok output.strip()
+proc gitResult(cmd: string): Future[R[string]] {.async.} =
+  let resp = await git(cmd)
+  if resp.status != 0:
+    return err fmt"cmd: `git {cmd}` failed with exit code {resp.status}".appendError(resp.stdOutput)
+  ok resp.stdOutput.strip()
 
 proc processGitShow(showOutput: string): R[Commit] =
   var filtered: seq[string]
@@ -270,32 +294,33 @@ proc processGitShow(showOutput: string): R[Commit] =
   attempt(fmt"failed to parse time as integer: `{s[1]}`"):
     return ok Commit(hash: s[0], time: parseInt(s[1]))
 
-proc setLastestCommit(pkg: var NimPackage): R[void] =
-  let errMsgPrefix = fmt"failed to get most recent commit from local repo, {pkg.repo.path}"
+proc setLastestCommit(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
+  var p = pkg
+  let errMsgPrefix = fmt"failed to get most recent commit from local repo, {p.repo.path}"
   let output =
-    ?gitResult(fmt"-C {pkg.repo.path} show {pkg.meta.commit.hash} --format='%H|%ct' -s")
+    ?(await gitResult(fmt"-C {p.repo.path} show {p.meta.commit.hash} --format='%H|%ct' -s"))
     .prependError(errMsgPrefix)
-  pkg.meta.commit =
+  p.meta.commit =
     ?processGitShow(output)
     .prependError(errMsgPrefix)
-  ok()
+  ok(p)
 
-proc log(repo: GitRepo): R[string] =
+proc log(repo: GitRepo): Future[R[string]] {.async.} =
   let cmd =
     fmt"-C {repo.path} log --format='%H|%D|%ct'" &
     " --decorate-refs='refs/tags/v*.*' --decorate-refs='refs/tags/*.*.*' --tags --no-walk"
-  gitResult(cmd)
+  return await gitResult(cmd)
 
-proc clone(pkg: NimPackage): E =
+proc clone(pkg: NimPackage): Future[E] {.async.} =
   # TODO: attach repo to the package and use in skipHook?
   let repo = pkg.repo
   if not dirExists repo.path:
     discard
-      ?gitResult(fmt"clone {repo.url} {repo.path}")
+      ?(await gitResult(fmt"clone {repo.url} {repo.path}"))
       .prependError(fmt"failed to clone {repo.url} to {repo.path}")
     ok()
   else:
-    discard ?gitResult(fmt"-C {repo.path} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' --prune")
+    discard ?(await gitResult(fmt"-C {repo.path} fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' --prune"))
       .prependError(fmt"failed to update local repo at {repo.path}")
     ok()
 
@@ -319,20 +344,22 @@ proc parseVersionsFromLog(log: string): R[seq[Version]] =
         )
   ok vs
 
-proc getNimbleDump(pkg: var NimPackage): E =
+proc getNimbleDump(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
   # for now use the git checkout of HEAD
   # TODO: abstract the nimble command to always use --useSystemNim and --nimbleDir:(absolute-path)
   # TODO: parse seperately the following 'Error:  Could not find a file with a .nimble extension inside the specified directory:'
-  let dumpOutput = ?cmdResult(fmt"nimble dump --nimbleDir:../../nimbleDir --useSystemNim --json", workingDir = ?pkg.nimbleWorkingDir)
+  var p = pkg
+  let wd = ?p.nimbleWorkingDir
+  let dumpOutput = ?(await cmdResult("nimble dump --nimbleDir:../../nimbleDir --useSystemNim --json", workingDir = wd))
   # broken != a missing nimble file
   # preseve the "nimble error"
   let parsedDump = ?fromJsonResult(dumpOutput, NimbleDump)
-  pkg.meta.nimble = some(parsedDump)
+  p.meta.nimble = some(parsedDump)
 
   if parsedDump.bin.len > 0:
-    pkg.meta.hasBin = true
+    p.meta.hasBin = true
 
-  ok()
+  ok(p)
 
 # proc getNimbleDeps(pkg: var NimPackage): E =
 #   # BUG: nimble deps must be run from within the working dir
@@ -340,49 +367,54 @@ proc getNimbleDump(pkg: var NimPackage): E =
 #   pkg.meta.deps = ?fromJsonResult(depsOutput, RawJson)
 #   ok()
 
-proc getNimbleMeta(pkg: var NimPackage): E =
-  debug pkg, "getting nimble dump data"
-  if pkg.meta.versions.len != 0:
-    let latest = pkg.meta.versions[0].hash
-    discard ?gitResult(fmt"-C {pkg.repo.path} checkout {latest}")
-  getNimbleDump(pkg).isOkOr:
-    pkg.meta.broken = true
-    error pkg.name, " is not a working package see error: ", error
-  ok()
+proc getNimbleMeta(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
+  var p = pkg
+  debug p, "getting nimble dump data"
+  if p.meta.versions.len != 0:
+    let latest = p.meta.versions[0].hash
+    discard ?(await gitResult(fmt"-C {p.repo.path} checkout {latest}"))
+  let dumped = await getNimbleDump(p)
+  if dumped.isOk:
+    p = dumped.get()
+  else:
+    p.meta.broken = true
+    error p.name, " is not a working package see error: ", dumped.error()
+  ok(p)
 
   # ?getNimbleDeps(pkg)
 
 # NOTE updating metadata should be it's own seperate proc executed if this one returns true.
-proc gitUpdateVersions(pkg: var NimPackage): R[void] =
-  debug pkg, "checking for new tags"
-  let versions = pkg.meta.versions
-  pkg.meta.versions = @[]
-  ?pkg.clone()
-  ?pkg.setLastestCommit
-  let output = ?pkg.repo.log()
+proc gitUpdateVersions(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
+  var p = pkg
+  debug p, "checking for new tags"
+  let versions = p.meta.versions
+  p.meta.versions = @[]
+  ?(await clone(p))
+  p = ?(await setLastestCommit(p))
+  let output = ?(await p.repo.log())
   if output != "":
-    pkg.meta.versions = ?parseVersionsFromLog(output)
-  if not pkg.meta.broken and (versions != pkg.meta.versions or pkg.meta.versions.len == 0):
-    ?getNimbleMeta(pkg)
+    p.meta.versions = ?parseVersionsFromLog(output)
+  if not p.meta.broken and (versions != p.meta.versions or p.meta.versions.len == 0):
+    p = ?(await getNimbleMeta(p))
 
   # if i just make context a global this is more straightforward to handle
-  # removeDir(pkg.repo.path)
-  ok()
+  # removeDir(p.repo.path)
+  ok(p)
 
 
-proc hgUpdateVersions(pkg: var NimPackage): R[void] =
+proc hgUpdateVersions(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
   ## mercurial repos are officially supported,
   ## but all existing packages are tagged deleted.
   return err "mercurial repositories are not currently supported"
 
-proc updateVersions*(pkg: var NimPackage): R[void] =
+proc updateVersions*(pkg: NimPackage): Future[R[NimPackage]] {.async.} =
   case pkg.`method`
   of "git":
-    gitUpdateVersions(pkg)
+    return await gitUpdateVersions(pkg)
   of "hg":
-    hgUpdateVersions(pkg)
+    return await hgUpdateVersions(pkg)
   else:
-    err "missing method"
+    return err "missing method"
 
 
 proc `|=`*(b: var bool, x: bool) =
@@ -434,30 +466,35 @@ proc remoteIsUnreachable(response: string): R[bool] =
   test ("The requested URL returned error: 502" in response)
   test ("TLS connect error" in response)
   test ("The requested URL returned error: 504" in response)
+  test ("Failed to connect to" in response) # gitlab.3dicc.com
 
   err "unable to interpret git ls-remote, see below:\n" & response.strip()
 
-proc lsRemote(r: GitRepo): tuple[output: string, exitCode: int] =
-  result = git(fmt"ls-remote {r.url}")
+proc lsRemote(r: GitRepo): Future[CommandExResponse] {.async.} =
+  return await git(fmt"ls-remote {r.url}")
 
-proc compare(np: var NimPackage, remote: Remote): bool =
-  if np.meta.commit.hash == remote.hash and np.meta.commit.time != 0:
-    return false
+proc compare(np: NimPackage, remote: Remote): (bool, NimPackage) =
+  var p = np
+  if p.meta.commit.hash == remote.hash and p.meta.commit.time != 0:
+    return (false, p)
+  p.meta.commit = Commit(hash: remote.hash)
+  return (true, p)
 
-  np.meta.commit = Commit(hash: remote.hash)
-  return true
-
-proc checkRemotes*(pkg: var NimPackage): R[bool] =
-  ## if true package has new remotes
-  if pkg.meta.status in {Unreachable, Deleted} or pkg.isAlias:
-    return ok false # nothing to check for these so noop...
-  let (lsRemoteOutput, code) = pkg.repo.lsRemote()
-  if code != 0:
-    pkg.meta.status = Unreachable
-    return remoteIsUnreachable(lsRemoteOutput)
-  pkg.meta.status = Valid
-  let remote = ?recentRemote(lsRemoteOutput)
-  result = ok compare(pkg, remote)
+proc checkRemotes*(pkg: NimPackage): Future[R[CheckResult]] {.async.} =
+  ## if hasNewCommits is true the package has new remotes
+  var p = pkg
+  if p.meta.status in {Unreachable, Deleted} or p.isAlias:
+    return ok CheckResult(hasNewCommits: false, pkg: p)
+  let resp = await p.repo.lsRemote()
+  if resp.status != 0:
+    p.meta.status = Unreachable
+    let lsRemoteErr =
+      remoteIsUnreachable(resp.stdOutput).errorOr("")
+    return ok CheckResult(hasNewCommits: false, pkg: p, err: lsRemoteErr)
+  p.meta.status = Valid
+  let remote = ?recentRemote(resp.stdOutput)
+  let (hasNew, updatedPkg) = compare(p, remote)
+  ok CheckResult(hasNewCommits: hasNew, pkg: updatedPkg)
 
 proc fetchPackageJson(hash: string): R[string] =
   let url =
@@ -476,13 +513,12 @@ proc cmpPkgs*(a:string, b: string): int =
 proc cmpPkgs*(a, b: Package): int =
   cmpPkgs(a.name, b.name)
 
-proc getOfficialHead*(): R[Remote] =
+proc getOfficialHead*(): Future[R[Remote]] {.async.} =
   let repo = GitRepo(url: "https://github.com/nim-lang/packages")
-  let
-    (remoteResponse, code) = repo.lsRemote()
-  if code != 0:
-    return err "failed to get nim-lang/packages revision".appendError(remoteResponse)
-  recentRemote(remoteResponse).prependError("couldn't get remote ref for official packages")
+  let resp = await repo.lsRemote()
+  if resp.status != 0:
+    return err "failed to get nim-lang/packages revision".appendError(resp.stdOutput)
+  recentRemote(resp.stdOutput).prependError("couldn't get remote ref for official packages")
 
 proc getOfficialPackages*(hash: string): R[seq[Package]] =
   var packages = ?fromJsonResult(?fetchPackageJson(hash), seq[Package])
@@ -521,16 +557,16 @@ template withTmpDir(body: untyped) =
     # TODO: add a debug mode where we don't delete it?
     removeDir(tmpd)
 
-proc getRecentlyAdded*(rev: string, start: seq[Package]): R[seq[string]] =
+proc getRecentlyAdded*(rev: string, start: seq[Package]): Future[R[seq[string]]] {.async.} =
   var n = 1
   var recent: seq[string]
   var current = start.mapIt(it.name).toHashSet()
   debug "fetching official repo to update recent packages"
   withTmpDir:
-    discard ?gitResult(fmt"clone https://github.com/nim-lang/packages {tmpd}")
+    discard ?(await gitResult(fmt"clone https://github.com/nim-lang/packages {tmpd}"))
     while recent.len < 10:
       debug fmt"recent fetch | iter: {n}"
-      let output = ?gitResult(fmt"-C {tmpd} show {rev}~{n}:packages.json")
+      let output = ?(await gitResult(fmt"-C {tmpd} show {rev}~{n}:packages.json"))
       let prev = ?output.fromJsonResult(seq[Package]).map(pkgs => pkgs.mapIt(it.name).toHashSet())
       let new = current - prev
       for n in new:
